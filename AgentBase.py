@@ -28,14 +28,14 @@ def parse_callable_to_openai_params(func: Callable[..., Any]) -> dict[str, Any]:
     hints = get_type_hints(func)
 
     properties = {}
-    required = []
+    required: list[str] = []
 
     for name, param in sig.parameters.items():
-        param_info = {
+        param_info: dict[str, str] = {
             "type": (
-                hints.get(name, None).__name__ if hints.get(name, None) else "string"
+                hints.get(name, None).__name__ if hints.get(name, None) else "string" # pyright: ignore[reportOptionalMemberAccess]
             ),
-            "description": f"Parameter '{name}' of type {hints.get(name, None).__name__ if hints.get(name, None) else 'string'}",
+            "description": f"Parameter '{name}' of type {hints.get(name, None).__name__ if hints.get(name, None) else 'string'}", # pyright: ignore[reportOptionalMemberAccess]
         }
         properties[name] = param_info
 
@@ -84,9 +84,11 @@ class AgentBase_OpenAIBackend:
             []
         )  # 存储工具列表的JSON-ready版本，每个元素是一个字典，包含工具名称和描述，用于传给模型
 
+        self.token_usage: dict[str, int] = {}
+
     # 获取当前Agent自创建以来的token消耗量，不用急着实现
     def get_token_consumption(self) -> dict[str, int]:
-        raise NotImplementedError("Subclasses must implement this method")
+        return self.token_usage
 
     # 设置系统提示词
     def set_system_prompt(self, system_prompt: str) -> None:
@@ -126,6 +128,16 @@ class AgentBase_OpenAIBackend:
                 },
             }
         )
+
+    from openai.types.completion_usage import CompletionUsage
+
+    def _handle_usage(self, usage: Optional[CompletionUsage]) -> None:
+        if usage is None:
+            return
+        usage_dict = usage.model_dump()
+        for k, v in usage_dict.items():
+            if isinstance(v, int):
+                self.token_usage[k] = self.token_usage.get(k, 0) + v
 
     def _handle_tool_call(self, tool_name: str, tool_args: dict[str, Any]) -> str:
         for tool in self.tool_list:
