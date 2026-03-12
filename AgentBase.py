@@ -5,23 +5,6 @@ import inspect
 from typing import get_type_hints
 import json
 
-def parse_callable(func: Callable[..., Any]) -> dict[str, dict[str, Any]]:
-    sig = inspect.signature(func)
-    hints = get_type_hints(func)
-
-    result: dict[str, dict[str, Any]] = {}
-
-    for name, param in sig.parameters.items():
-        result[name] = {
-            "type": hints.get(name, None),
-            "default": (
-                None if param.default is inspect.Parameter.empty else param.default
-            ),
-            "kind": param.kind.name,
-        }
-
-    return result
-
 
 def parse_callable_to_openai_params(func: Callable[..., Any]) -> dict[str, Any]:
     sig = inspect.signature(func)
@@ -39,6 +22,19 @@ def parse_callable_to_openai_params(func: Callable[..., Any]) -> dict[str, Any]:
             ),
             "description": f"Parameter '{name}' of type {hints.get(name, None).__name__ if hints.get(name, None) else 'string'}",  # pyright: ignore[reportOptionalMemberAccess]
         }
+
+        #将param_info中的类型名转换成json schema支持的类型名
+        type_mapping = {
+            "str": "string",
+            "int": "integer",
+            "float": "number",
+            "bool": "boolean",
+            "list": "array",
+            "dict": "object",
+        }
+        if param_info["type"] in type_mapping:
+            param_info["type"] = type_mapping[param_info["type"]]
+
         properties[name] = param_info
 
         if param.default is inspect.Parameter.empty:

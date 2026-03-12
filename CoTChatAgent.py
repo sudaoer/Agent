@@ -2,7 +2,7 @@
 from typing import Any
 
 from openai.types.chat.chat_completion import ChatCompletion
-from AgentBase import AgentBase_OpenAIBackend
+from .AgentBase import AgentBase_OpenAIBackend
 
 
 class CoTChatAgent(AgentBase_OpenAIBackend):
