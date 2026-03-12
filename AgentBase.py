@@ -86,7 +86,7 @@ class AgentBase_OpenAIBackend:
 
         self.token_usage: dict[str, int] = {}
 
-    # 获取当前Agent自创建以来的token消耗量，不用急着实现
+    # 获取当前Agent自创建以来的token消耗量
     def get_token_consumption(self) -> dict[str, int]:
         return self.token_usage
 

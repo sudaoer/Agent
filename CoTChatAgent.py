@@ -1,14 +1,16 @@
-# 不带思维链的agent，因此不需要额外维护思维链的工具调用
-
+# 对于有思维链且可以在思维链中调用工具的模型，在tool call上需要特殊处理
 from typing import Any
-
 from AgentBase import AgentBase_OpenAIBackend
 import json
 
 
-class NormalChatAgent(AgentBase_OpenAIBackend):
+class CoTChatAgent(AgentBase_OpenAIBackend):
     def __init__(
-        self, name: str, base_url: str, model_name: str, api_key: str = "test_api_key"
+        self,
+        name: str,
+        base_url: str,
+        model_name: str,
+        api_key: str = "test_api_key",
     ):
         super().__init__(name, base_url, model_name, api_key)
         self.history: list[dict[str, Any]] = []
@@ -21,8 +23,8 @@ class NormalChatAgent(AgentBase_OpenAIBackend):
 
         response = self.openai_client.chat.completions.create(
             model=self.model_name,
-            messages=self.history, # type: ignore
-            tools=self.tool_list_jsonready_cache, # type: ignore
+            messages=self.history,  # type: ignore
+            tools=self.tool_list_jsonready_cache,  # type: ignore
         )
         super()._handle_usage(response.usage)
 
@@ -31,6 +33,7 @@ class NormalChatAgent(AgentBase_OpenAIBackend):
                 {
                     "role": "assistant",
                     "content": response.choices[0].message.content,
+                    "reasoning_content": response.choices[0].message.reasoning_content,  # type: ignore
                     "tool_calls": response.choices[0].message.tool_calls,
                 }
             )
@@ -59,32 +62,32 @@ class NormalChatAgent(AgentBase_OpenAIBackend):
                 )
             response = self.openai_client.chat.completions.create(
                 model=self.model_name,
-                messages=self.history, # type: ignore
-                tools=self.tool_list_jsonready_cache, # type: ignore
+                messages=self.history,  # type: ignore
+                tools=self.tool_list_jsonready_cache,  # type: ignore
             )
             super()._handle_usage(response.usage)
 
         assistant_reply = response.choices[0].message.content
         assert assistant_reply is not None, "模型回复的内容为None"
-        self.history.append({"role": "assistant", "content": assistant_reply})
+        self.history.append({"role": "assistant", "content": assistant_reply, "reasoning_content": response.choices[0].message.reasoning_content})  # type: ignore
         return assistant_reply
 
-    def get_history(self) -> list[dict[str, str]]:
+    def get_history(self) -> list[dict[str, Any]]:
         return self.history
 
 
 def get_time() -> str:
     import datetime
 
-    return f"当前时间是：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    return f"现在是北京时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
 
 import os
 
 if __name__ == "__main__":
     END_POINT = "https://api.deepseek.com"
-    MODEL = "deepseek-chat"
-    agent = NormalChatAgent(
+    MODEL = "deepseek-reasoner"
+    agent = CoTChatAgent(
         name="TestAgent",
         base_url=END_POINT,
         model_name=MODEL,
@@ -100,10 +103,11 @@ if __name__ == "__main__":
         tool_description="获取当前时间，无需参数",
     )
 
-    user_message = "现在几点了"
-    response = agent.chat(user_message)
+    response = agent.chat("现在美国几点了")
+    print("模型回复：", response)
+
+    response = agent.chat("现在英国又是几点")
     print("模型回复：", response)
 
     print("对话历史：", agent.get_history())
-
     print(f"Token消耗： {agent.get_token_consumption()}")
