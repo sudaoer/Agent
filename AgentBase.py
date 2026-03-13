@@ -4,6 +4,8 @@ from typing import Callable, Any, Optional
 import inspect
 from typing import get_type_hints
 import json
+import time
+import logging
 
 
 def parse_callable_to_openai_params(func: Callable[..., Any]) -> dict[str, Any]:
@@ -18,12 +20,11 @@ def parse_callable_to_openai_params(func: Callable[..., Any]) -> dict[str, Any]:
             "type": (
                 hints.get(name, None).__name__  # type: ignore
                 if hints.get(name, None)
-                else "string"  # pyright: ignore[reportOptionalMemberAccess]
-            ),
-            "description": f"Parameter '{name}' of type {hints.get(name, None).__name__ if hints.get(name, None) else 'string'}",  # pyright: ignore[reportOptionalMemberAccess]
+                else "string"
+            )
         }
 
-        #将param_info中的类型名转换成json schema支持的类型名
+        # 将param_info中的类型名转换成json schema支持的类型名
         type_mapping = {
             "str": "string",
             "int": "integer",
@@ -58,6 +59,9 @@ class AgentBase_OpenAIBackend:
         ] = None,  # lm-studio或其他本地部署的模型可能不需要api_key，但是仍然需要传参
         proxy: Optional[str] = "http://127.0.0.1:7890",
     ):
+
+        self._logger = logging.getLogger(__name__)
+
         self.name = name
         self.base_url = base_url
         self.model_name = model_name
@@ -101,10 +105,11 @@ class AgentBase_OpenAIBackend:
 
         response = self._post_chatHistory(self.history)
 
-        while response.choices[0].message.tool_calls is not None and len(response.choices[0].message.tool_calls) > 0:
-            self.history.append(
-                response.choices[0].message.model_dump()  # type: ignore
-            )
+        while (
+            response.choices[0].message.tool_calls is not None
+            and len(response.choices[0].message.tool_calls) > 0
+        ):
+            self.history.append(response.choices[0].message.model_dump())
             for tool_call in response.choices[0].message.tool_calls:
                 tool_name = tool_call.function.name  # type: ignore
                 tool_args = tool_call.function.arguments  # type: ignore
@@ -135,9 +140,9 @@ class AgentBase_OpenAIBackend:
         self.history.append(response.choices[0].message.model_dump())  # type: ignore
         return assistant_reply
 
-    # 获取当前Agent的对话历史，返回一个列表，每个元素是一个字典，包含"role"和"content"两个键（可能还有reasoning_content）
+    # 获取当前Agent的对话历史，返回一个列表，每个元素是一个字典
     # 分别表示消息的角色（如"user"或"assistant"）和消息内容
-    def get_history(self) -> list[dict[str, str]]:
+    def get_history(self) -> list[dict[str, Any]]:
         return self.history
 
     # 注册一个工具，工具由工具名称和一个函数组成，函数接受一个字典参数（包含工具调用的必要信息），返回一个字符串结果
@@ -169,23 +174,38 @@ class AgentBase_OpenAIBackend:
     from openai.types.chat.chat_completion import ChatCompletion
 
     def _post_chatHistory(self, history: list[dict[str, Any]]) -> ChatCompletion:
+        time_start = time.perf_counter()
         response = self.openai_client.chat.completions.create(
             model=self.model_name,
             messages=history,  # type: ignore
             tools=self.tool_list_jsonready_cache,  # type: ignore
         )
-        self._handle_usage(response.usage)
+        time_end = time.perf_counter()
+        this_usage = self._handle_usage(response.usage)
+        # 计算token生成速度
+        completion_tokens = this_usage.get("completion_tokens", 0)
+        time_cost = time_end - time_start
+        tokens_per_second = completion_tokens / time_cost if time_cost > 0 else 0
+        self._logger.info(
+            f"{tokens_per_second:.2f} tokens/s, use time {time_cost:.2f}s"
+        )
+
         return response
 
     from openai.types.completion_usage import CompletionUsage
 
-    def _handle_usage(self, usage: Optional[CompletionUsage]) -> None:
+    def _handle_usage(self, usage: Optional[CompletionUsage]) -> dict[str, Any]:
         if usage is None:
-            return
+            return {}
         usage_dict = usage.model_dump()
         for k, v in usage_dict.items():
             if isinstance(v, int):
                 self.token_usage[k] = self.token_usage.get(k, 0) + v
+            elif isinstance(v, dict):
+                for sub_k, sub_v in v.items():  # type: ignore
+                    if isinstance(sub_v, int):
+                        self.token_usage[sub_k] = self.token_usage.get(sub_k, 0) + sub_v  # type: ignore
+        return usage_dict
 
     def _handle_tool_call(self, tool_name: str, tool_args: dict[str, Any]) -> str:
         for tool in self.tool_list:
