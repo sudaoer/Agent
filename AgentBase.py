@@ -173,12 +173,15 @@ class AgentBase_OpenAIBackend:
 
     from openai.types.chat.chat_completion import ChatCompletion
 
-    def _post_chatHistory(self, history: list[dict[str, Any]]) -> ChatCompletion:
+    def _post_chatHistory(
+        self, history: list[dict[str, Any]], extra_body: Optional[dict[str, Any]] = None
+    ) -> ChatCompletion:
         time_start = time.perf_counter()
         response = self.openai_client.chat.completions.create(
             model=self.model_name,
             messages=history,  # type: ignore
             tools=self.tool_list_jsonready_cache,  # type: ignore
+            extra_body=extra_body,
         )
         time_end = time.perf_counter()
         this_usage = self._handle_usage(response.usage)
