@@ -4,7 +4,7 @@ from typing import Any
 import logging
 from .AgentBase import AgentBase, get_local_config
 
-
+# 专用于实现网页搜索功能，虽然比较简单，但可以利用百炼平台的搜索工具，避免自己去调用搜索引擎api的麻烦，同时成本也比较低廉（4元/1000次）
 class AliBailian_RESP_Agent(AgentBase):
     def __init__(self):
 
@@ -32,7 +32,7 @@ class AliBailian_RESP_Agent(AgentBase):
             input=[
                 {
                     "role": "system",
-                    "content": "You are an AI assistant designed to help users perform web searches. Please treat the user's input as the search query, use appropriate keywords to conduct the search, and provide a summary of the search results, removing any irrelevant formatting information. Do not return the original web pages.",
+                    "content": "You are an AI assistant designed to help users perform web searches. Please treat the user's input as the search query, use appropriate keywords to conduct the search, and provide a summary of the search results, removing any irrelevant formatting information. Read as many web pages as possible. Do not return the original web pages.",
                 },
                 {"role": "user", "content": query},
             ],  # type: ignore
@@ -46,7 +46,7 @@ class AliBailian_RESP_Agent(AgentBase):
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning)
             response = response.model_dump()  # type: ignore
-            
+
         # 现在的response应该是一个字典
         logging.debug(f"{type(response)}")
         # 如果有error字段且不为空，说明请求失败了
