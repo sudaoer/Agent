@@ -173,7 +173,7 @@ class AgentBase_OpenAIBackend(AgentBase):
                         tool_name=tool_name, tool_args=tool_args
                     )
                 except Exception as e:
-                    tool_result = f"发生错误：{str(e)}"
+                    tool_result = f"发生错误：{type(e).__name__}:{str(e)}"
 
                 self.history.append(
                     {
@@ -231,23 +231,39 @@ class AgentBase_OpenAIBackend(AgentBase):
     ) -> ChatCompletion:
 
         self.write_history_log(log_path)
-
-        time_start = time.perf_counter()
-        response = self.openai_client.chat.completions.create(
-            model=self.model_name,
-            messages=history,  # type: ignore
-            tools=self.tool_list_jsonready_cache,  # type: ignore
-            extra_body=extra_body,
-        )
-        time_end = time.perf_counter()
-        this_usage = self._handle_usage(response.usage)
-        # 计算token生成速度
-        completion_tokens = this_usage.get("completion_tokens", 0)
-        time_cost = time_end - time_start
-        tokens_per_second = completion_tokens / time_cost if time_cost > 0 else 0
-        self._logger.info(
-            f"{tokens_per_second:.2f} tokens/s, use time {time_cost:.2f}s"
-        )
+        while True:
+            time_start = time.perf_counter()
+            response = self.openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=history,  # type: ignore
+                tools=self.tool_list_jsonready_cache,  # type: ignore
+                extra_body=extra_body
+            )
+            time_end = time.perf_counter()
+            this_usage = self._handle_usage(response.usage)
+            # 计算token生成速度
+            completion_tokens = this_usage.get("completion_tokens", 0)
+            time_cost = time_end - time_start
+            tokens_per_second = completion_tokens / time_cost if time_cost > 0 else 0
+            self._logger.info(
+                f"{tokens_per_second:.2f} tokens/s, use time {time_cost:.2f}s"
+            )
+            # 检测toolcall是否合法
+            all_tool_calls_valid = True
+            for tool_call in response.choices[0].message.tool_calls or []:
+                tool_arg = tool_call.function.arguments  # type: ignore
+                try:
+                    tool_arg = json.loads(tool_arg)  # type: ignore
+                    if not isinstance(tool_arg, dict):  # type: ignore
+                        raise ValueError("工具参数应该是一个JSON对象格式的字符串")
+                except Exception as e:
+                    all_tool_calls_valid = False
+                    self._logger.error(
+                        f"Invalid tool call arguments: {tool_arg}, error: {e}\nRetrying..."
+                    )
+                    break
+            if all_tool_calls_valid:
+                break
 
         return response
 
