@@ -17,7 +17,10 @@ class CoTChatAgent(AgentBase_OpenAIBackend):
         self.history: list[dict[str, Any]] = []
 
     def _post_chatHistory(
-        self, history: list[dict[str, Any]], extra_body: Optional[dict[str, Any]] = None
+        self,
+        history: list[dict[str, Any]],
+        extra_body: Optional[dict[str, Any]] = None,
+        log_path: Optional[str] = None,
     ) -> ChatCompletion:
         extra_body = extra_body or {}
         extra_body["enable_thinking"] = True
@@ -29,7 +32,7 @@ class CoTChatAgent(AgentBase_OpenAIBackend):
                 start_del = True
             if start_del and "reasoning_content" in history[i]:
                 del history_tmp[i]["reasoning_content"]
-        return super()._post_chatHistory(history_tmp, extra_body)
+        return super()._post_chatHistory(history_tmp, extra_body, log_path=log_path)
 
 
 def get_time() -> str:

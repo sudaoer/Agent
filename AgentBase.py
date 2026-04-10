@@ -124,14 +124,34 @@ class AgentBase_OpenAIBackend(AgentBase):
     def set_system_prompt(self, system_prompt: str) -> None:
         self.system_prompt = system_prompt
 
+    def write_history_log(self, log_path: Optional[str]) -> None:
+        if log_path is not None:
+
+            # 递归遍历history中的每个str，如果这个str可以被解读为一个json对象，就将这个str替换成这个json对象
+            def try_parse_json(obj: Any) -> Any:
+                if isinstance(obj, str):
+                    try:
+                        return json.loads(obj)
+                    except Exception:
+                        return obj
+                elif isinstance(obj, list):
+                    return [try_parse_json(item) for item in obj]  # type: ignore
+                elif isinstance(obj, dict):
+                    return {key: try_parse_json(value) for key, value in obj.items()}  # type: ignore
+                else:
+                    return obj
+
+            with open(log_path, "w") as f:
+                json.dump(try_parse_json(self.history), f, indent=4, ensure_ascii=False)
+
     # 进行一次对话，输入为用户消息，输出为模型回复，并且处理工具调用并更新对话历史
-    def chat(self, messages: str) -> str:
+    def chat(self, messages: str, log_path: Optional[str] = None) -> str:
         # 如果没有历史记录，则使用系统提示词作为对话的开头
         if len(self.history) == 0:
             self.history = [{"role": "system", "content": self.system_prompt}]
         self.history.append({"role": "user", "content": messages})
 
-        response = self._post_chatHistory(self.history)
+        response = self._post_chatHistory(self.history, log_path=log_path)
 
         while (
             response.choices[0].message.tool_calls is not None
@@ -148,8 +168,9 @@ class AgentBase_OpenAIBackend(AgentBase):
                     type(tool_args) == str  # type: ignore
                 ), f"工具参数应该是字符串格式的JSON，但得到的类型是{type(tool_args)}"  # type: ignore
                 try:
+                    tool_args = json.loads(tool_args)  # type: ignore
                     tool_result = self._handle_tool_call(
-                        tool_name, json.loads(tool_args)
+                        tool_name=tool_name, tool_args=tool_args
                     )
                 except Exception as e:
                     tool_result = f"发生错误：{str(e)}"
@@ -161,11 +182,12 @@ class AgentBase_OpenAIBackend(AgentBase):
                         "tool_call_id": tool_call.id,
                     }
                 )
-            response = self._post_chatHistory(self.history)
+            response = self._post_chatHistory(self.history, log_path=log_path)
 
         assistant_reply = response.choices[0].message.content
         assert assistant_reply is not None, "模型回复的内容为None"
         self.history.append(response.choices[0].message.model_dump())  # type: ignore
+        self.write_history_log(log_path)
         return assistant_reply
 
     # 获取当前Agent的对话历史，返回一个列表，每个元素是一个字典
@@ -202,8 +224,14 @@ class AgentBase_OpenAIBackend(AgentBase):
     from openai.types.chat.chat_completion import ChatCompletion
 
     def _post_chatHistory(
-        self, history: list[dict[str, Any]], extra_body: Optional[dict[str, Any]] = None
+        self,
+        history: list[dict[str, Any]],
+        extra_body: Optional[dict[str, Any]] = None,
+        log_path: Optional[str] = None,
     ) -> ChatCompletion:
+
+        self.write_history_log(log_path)
+
         time_start = time.perf_counter()
         response = self.openai_client.chat.completions.create(
             model=self.model_name,
