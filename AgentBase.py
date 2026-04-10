@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from openai import OpenAI
 import httpx
 from typing import Callable, Any, Optional
@@ -6,6 +8,7 @@ from typing import get_type_hints
 import json
 import time
 import logging
+from abc import ABC, abstractmethod
 
 
 def parse_callable_to_openai_params(func: Callable[..., Any]) -> dict[str, Any]:
@@ -48,7 +51,32 @@ def parse_callable_to_openai_params(func: Callable[..., Any]) -> dict[str, Any]:
     }
 
 
-class AgentBase_OpenAIBackend:
+def get_local_config(config_name: str) -> dict[str, str]:
+    default_config = Path(__file__).resolve().parent / "secret.json"
+    if not default_config.exists():
+        raise FileNotFoundError(f"Local config file not found: {default_config}")
+    with open(default_config, "r") as f:
+        config_data = json.load(f)
+    if config_name not in config_data:
+        raise ValueError(f"Config '{config_name}' not found in local config file")
+    return config_data[config_name]
+
+
+class AgentBase(ABC):
+    @abstractmethod
+    def __init__(self):
+        pass
+
+    @abstractmethod
+    def set_system_prompt(self, system_prompt: str) -> None:
+        pass
+
+    @abstractmethod
+    def chat(self, messages: str) -> str:
+        pass
+
+
+class AgentBase_OpenAIBackend(AgentBase):
     def __init__(
         self,
         name: str,
