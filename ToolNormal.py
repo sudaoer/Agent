@@ -3,7 +3,7 @@
 
 from typing import Any
 from abc import abstractmethod
-from . import ToolBase
+from .ToolBase import ToolBase
 
 
 class ToolNormal(ToolBase):
