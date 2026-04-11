@@ -1,54 +1,12 @@
 from pathlib import Path
-
 from openai import OpenAI
 import httpx
-from typing import Callable, Any, Optional
-import inspect
-from typing import get_type_hints
+from typing import Any, Optional
 import json
 import time
 import logging
 from abc import ABC, abstractmethod
-
-
-def parse_callable_to_openai_params(func: Callable[..., Any]) -> dict[str, Any]:
-    sig = inspect.signature(func)
-    hints = get_type_hints(func)
-
-    properties = {}
-    required: list[str] = []
-
-    for name, param in sig.parameters.items():
-        param_info: dict[str, str] = {
-            "type": (
-                hints.get(name, None).__name__  # type: ignore
-                if hints.get(name, None)
-                else "string"
-            )
-        }
-
-        # 将param_info中的类型名转换成json schema支持的类型名
-        type_mapping = {
-            "str": "string",
-            "int": "integer",
-            "float": "number",
-            "bool": "boolean",
-            "list": "array",
-            "dict": "object",
-        }
-        if param_info["type"] in type_mapping:
-            param_info["type"] = type_mapping[param_info["type"]]
-
-        properties[name] = param_info
-
-        if param.default is inspect.Parameter.empty:
-            required.append(name)
-
-    return {
-        "type": "object",
-        "properties": properties,
-        "required": required,
-    }
+from .ToolBase import ToolBase
 
 
 def get_local_config(config_name: str) -> dict[str, str]:
@@ -107,9 +65,7 @@ class AgentBase_OpenAIBackend(AgentBase):
                 f"Model '{self.model_name}' is not available in the model list: {[model.id for model in model_list.data]}"
             )
 
-        self.tool_list: list[dict[str, Any]] = (
-            []
-        )  # 存储注册的工具信息，每个元素是一个字典，包含工具名称、描述和函数
+        self.tool_list: list[ToolBase] = []  # 存储注册的工具
         self.tool_list_jsonready_cache: list[dict[str, Any]] = (
             []
         )  # 存储工具列表的JSON-ready版本，每个元素是一个字典，包含工具名称和描述，用于传给模型
@@ -159,28 +115,8 @@ class AgentBase_OpenAIBackend(AgentBase):
         ):
             self.history.append(response.choices[0].message.model_dump())
             for tool_call in response.choices[0].message.tool_calls:
-                tool_name = tool_call.function.name  # type: ignore
-                tool_args = tool_call.function.arguments  # type: ignore
-                assert (
-                    type(tool_name) == str  # type: ignore
-                ), f"工具名称应该是字符串，但得到的类型是{type(tool_name)}"  # type: ignore
-                assert (
-                    type(tool_args) == str  # type: ignore
-                ), f"工具参数应该是字符串格式的JSON，但得到的类型是{type(tool_args)}"  # type: ignore
-                try:
-                    tool_args = json.loads(tool_args)  # type: ignore
-                    tool_result = self._handle_tool_call(
-                        tool_name=tool_name, tool_args=tool_args
-                    )
-                except Exception as e:
-                    tool_result = f"发生错误：{type(e).__name__}:{str(e)}"
-
-                self.history.append(
-                    {
-                        "role": "tool",
-                        "content": tool_result,
-                        "tool_call_id": tool_call.id,
-                    }
+                self.history = self._handle_tool_call(
+                    tool_call.model_dump(), self.history
                 )
             response = self._post_chatHistory(self.history, log_path=log_path)
 
@@ -194,32 +130,6 @@ class AgentBase_OpenAIBackend(AgentBase):
     # 分别表示消息的角色（如"user"或"assistant"）和消息内容
     def get_history(self) -> list[dict[str, Any]]:
         return self.history
-
-    # 注册一个工具，工具由工具名称和一个函数组成，函数接受一个字典参数（包含工具调用的必要信息），返回一个字符串结果
-    def register_tool(
-        self,
-        tool_name: str,
-        tool_description: str,
-        tool_function: Callable[..., str],
-    ) -> None:
-        self.tool_list.append(
-            {
-                "name": tool_name,
-                "description": tool_description,
-                "function": tool_function,
-            }
-        )
-
-        self.tool_list_jsonready_cache.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": tool_name,
-                    "description": tool_description,
-                    "parameters": parse_callable_to_openai_params(tool_function),
-                },
-            }
-        )
 
     from openai.types.chat.chat_completion import ChatCompletion
 
@@ -282,8 +192,24 @@ class AgentBase_OpenAIBackend(AgentBase):
                         self.token_usage[sub_k] = self.token_usage.get(sub_k, 0) + sub_v  # type: ignore
         return usage_dict
 
-    def _handle_tool_call(self, tool_name: str, tool_args: dict[str, Any]) -> str:
+    def register_tool(self, tool: ToolBase) -> None:
+        self.tool_list.append(tool)
+        self.tool_list_jsonready_cache.append(tool.to_dict())
+
+    def _handle_tool_call(
+        self, tool_call: dict[str, Any], ctx: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        tool_name = tool_call["function"]["name"]
         for tool in self.tool_list:
-            if tool["name"] == tool_name:
-                return tool["function"](**tool_args)
-        raise ValueError(f"Tool '{tool_name}' not found in registered tools")
+            if tool.toolName == tool_name:
+                return tool.execute(tool_call, ctx)
+        error_msg = f"Tool '{tool_name}' not found in registered tools"
+        self._logger.error(error_msg)
+        ctx.append(
+            {
+                "role": "tool",
+                "content": error_msg,
+                "tool_call_id": tool_call["id"],
+            }
+        )
+        return ctx
