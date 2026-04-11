@@ -77,6 +77,8 @@ class AgentBase(ABC):
 
 
 class AgentBase_OpenAIBackend(AgentBase):
+    _logger = logging.getLogger(__name__)
+
     def __init__(
         self,
         name: str,
@@ -87,8 +89,6 @@ class AgentBase_OpenAIBackend(AgentBase):
         ] = None,  # lm-studio或其他本地部署的模型可能不需要api_key，但是仍然需要传参
         proxy: Optional[str] = "http://127.0.0.1:7890",
     ):
-
-        self._logger = logging.getLogger(__name__)
 
         self.name = name
         self.base_url = base_url
@@ -237,7 +237,7 @@ class AgentBase_OpenAIBackend(AgentBase):
                 model=self.model_name,
                 messages=history,  # type: ignore
                 tools=self.tool_list_jsonready_cache,  # type: ignore
-                extra_body=extra_body
+                extra_body=extra_body,
             )
             time_end = time.perf_counter()
             this_usage = self._handle_usage(response.usage)
