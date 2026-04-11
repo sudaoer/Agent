@@ -1,7 +1,7 @@
 from pathlib import Path
 from openai import OpenAI
 import httpx
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 import json
 import time
 import logging
@@ -73,6 +73,7 @@ class AgentBase_OpenAIBackend(AgentBase):
         )  # 存储工具列表的JSON-ready版本，每个元素是一个字典，包含工具名称和描述，用于传给模型
         self.token_usage: dict[str, int] = {}
         self.history: list[dict[str, Any]] = []
+        self.event_callback: Optional[Callable[[str, dict[str, Any]], None]] = None
 
     # 获取当前Agent自创建以来的token消耗量
     def get_token_consumption(self) -> dict[str, int]:
@@ -81,6 +82,15 @@ class AgentBase_OpenAIBackend(AgentBase):
     # 设置系统提示词
     def add_system_prompt(self, system_prompt: str) -> None:
         self.system_prompts.append(system_prompt)
+
+    def set_event_callback(
+        self, callback: Optional[Callable[[str, dict[str, Any]], None]]
+    ) -> None:
+        self.event_callback = callback
+
+    def emit_event(self, event_type: str, payload: dict[str, Any]) -> None:
+        if self.event_callback is not None:
+            self.event_callback(event_type, payload)
 
     def write_history_log(self, log_path: Optional[str]) -> None:
         if log_path is not None:
@@ -108,6 +118,7 @@ class AgentBase_OpenAIBackend(AgentBase):
         if len(self.history) == 0:
             self.history = [{"role": "system", "content": "\n".join(self.system_prompts)}]
         self.history.append({"role": "user", "content": messages})
+        self.emit_event("user_message", {"content": messages})
 
         response = self._post_chatHistory(self.history, log_path=log_path)
 
@@ -116,6 +127,15 @@ class AgentBase_OpenAIBackend(AgentBase):
             and len(response.choices[0].message.tool_calls) > 0
         ):
             self.history.append(response.choices[0].message.model_dump())
+            self.emit_event(
+                "assistant_tool_calls",
+                {
+                    "tool_calls": [
+                        tool_call.model_dump()
+                        for tool_call in response.choices[0].message.tool_calls
+                    ]
+                },
+            )
             for tool_call in response.choices[0].message.tool_calls:
                 self.history = self._handle_tool_call(
                     tool_call.model_dump(), self.history
@@ -125,6 +145,7 @@ class AgentBase_OpenAIBackend(AgentBase):
         assistant_reply = response.choices[0].message.content
         assert assistant_reply is not None, "模型回复的内容为None"
         self.history.append(response.choices[0].message.model_dump())  # type: ignore
+        self.emit_event("assistant_message", {"content": assistant_reply})
         self.write_history_log(log_path)
         return assistant_reply
 
@@ -159,6 +180,14 @@ class AgentBase_OpenAIBackend(AgentBase):
             tokens_per_second = completion_tokens / time_cost if time_cost > 0 else 0
             self._logger.info(
                 f"{tokens_per_second:.2f} tokens/s, use time {time_cost:.2f}s"
+            )
+            self.emit_event(
+                "model_response",
+                {
+                    "usage": this_usage,
+                    "time_cost": time_cost,
+                    "tokens_per_second": tokens_per_second,
+                },
             )
             # 检测toolcall是否合法
             all_tool_calls_valid = True
@@ -206,11 +235,40 @@ class AgentBase_OpenAIBackend(AgentBase):
         self, tool_call: dict[str, Any], ctx: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         tool_name = tool_call["function"]["name"]
+        tool_args: dict[str, Any] | str
+        try:
+            tool_args = ToolBase.parse_toolcall_arguments(tool_call)
+        except Exception:
+            tool_args = tool_call["function"]["arguments"]
+        self.emit_event(
+            "tool_call_start",
+            {"tool_name": tool_name, "arguments": tool_args, "tool_call_id": tool_call["id"]},
+        )
         for tool in self.tool_list:
             if tool.toolName == tool_name:
-                return tool.execute(tool_call, ctx)
+                new_ctx = tool.execute(tool_call, ctx)
+                tool_result = new_ctx[-1]["content"] if new_ctx else ""
+                self.emit_event(
+                    "tool_call_end",
+                    {
+                        "tool_name": tool_name,
+                        "arguments": tool_args,
+                        "tool_call_id": tool_call["id"],
+                        "result": tool_result,
+                    },
+                )
+                return new_ctx
         error_msg = f"Tool '{tool_name}' not found in registered tools"
         self._logger.error(error_msg)
+        self.emit_event(
+            "tool_call_end",
+            {
+                "tool_name": tool_name,
+                "arguments": tool_args,
+                "tool_call_id": tool_call["id"],
+                "result": error_msg,
+            },
+        )
         ctx.append(
             {
                 "role": "tool",
