@@ -54,7 +54,7 @@ if __name__ == "__main__":
     )
 
     system_prompt = "你是我的人工智能助手，协助我解答问题和完成任务。"
-    agent.set_system_prompt(system_prompt)
+    agent.add_system_prompt(system_prompt)
 
     agent.register_tool(
         tool_name="get_current_time",

@@ -26,7 +26,7 @@ class AgentBase(ABC):
         pass
 
     @abstractmethod
-    def set_system_prompt(self, system_prompt: str) -> None:
+    def add_system_prompt(self, system_prompt: str) -> None:
         pass
 
     @abstractmethod
@@ -58,6 +58,8 @@ class AgentBase_OpenAIBackend(AgentBase):
             base_url=self.base_url, api_key=self.api_key, http_client=self.httpx_client
         )
 
+        self.system_prompts: list[str] = []
+
         # 检查模型是否可用
         model_list = self.openai_client.models.list()
         if self.model_name not in [model.id for model in model_list.data]:
@@ -77,8 +79,8 @@ class AgentBase_OpenAIBackend(AgentBase):
         return self.token_usage
 
     # 设置系统提示词
-    def set_system_prompt(self, system_prompt: str) -> None:
-        self.system_prompt = system_prompt
+    def add_system_prompt(self, system_prompt: str) -> None:
+        self.system_prompts.append(system_prompt)
 
     def write_history_log(self, log_path: Optional[str]) -> None:
         if log_path is not None:
@@ -104,7 +106,7 @@ class AgentBase_OpenAIBackend(AgentBase):
     def chat(self, messages: str, log_path: Optional[str] = None) -> str:
         # 如果没有历史记录，则使用系统提示词作为对话的开头
         if len(self.history) == 0:
-            self.history = [{"role": "system", "content": self.system_prompt}]
+            self.history = [{"role": "system", "content": "\n".join(self.system_prompts)}]
         self.history.append({"role": "user", "content": messages})
 
         response = self._post_chatHistory(self.history, log_path=log_path)
@@ -195,6 +197,10 @@ class AgentBase_OpenAIBackend(AgentBase):
     def register_tool(self, tool: ToolBase) -> None:
         self.tool_list.append(tool)
         self.tool_list_jsonready_cache.append(tool.to_dict())
+        extra_prompt = tool.extra_system_prompt()
+        if extra_prompt:
+            self.add_system_prompt(extra_prompt)
+
 
     def _handle_tool_call(
         self, tool_call: dict[str, Any], ctx: list[dict[str, Any]]

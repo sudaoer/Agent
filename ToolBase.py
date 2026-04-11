@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Optional
 import json
 
 
@@ -56,3 +56,7 @@ class ToolBase(ABC):
                 "parameters": {"type": "object", "properties": properties},
             },
         }
+
+    # 额外的系统提示词
+    def extra_system_prompt(self) -> Optional[str]:
+        return None

@@ -21,7 +21,7 @@ class AliBailian_RESP_Agent(AgentBase):
         self._logger.setLevel(logging.DEBUG)
         self.client = OpenAI(base_url=self.base_url, api_key=self.api_key)
 
-    def set_system_prompt(self, system_prompt: str) -> None:
+    def add_system_prompt(self, system_prompt: str) -> None:
         raise NotImplementedError(
             "AliBailian_RESP_Agent does not support system prompt."
         )
