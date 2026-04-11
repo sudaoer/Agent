@@ -1,4 +1,6 @@
 # 使用阿里百炼平台的resp api，以使用百炼平台额外提供的服务，如网页搜索等
+import json
+
 from openai import OpenAI
 from typing import Any
 import logging
@@ -53,7 +55,7 @@ class AliBailian_RESP_Agent(AgentBase):
         self._logger.debug(f"{type(response)}")
         # 如果有error字段且不为空，说明请求失败了
         if "error" in response and response["error"] is not None:
-            return response["error"]
+            return json.dumps(response["error"])
         # 返回output数组的最后一个元素
         if "output" in response and len(response["output"]) > 0:
             return response["output"][-1]["content"][0]["text"]
