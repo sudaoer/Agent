@@ -40,33 +40,3 @@ def get_time() -> str:
 
     return f"现在是北京时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
-
-import os
-
-if __name__ == "__main__":
-    END_POINT = "http://127.0.0.1:1234/v1"
-    MODEL = "qwen/qwen3.5-9b"
-    agent = CoTChatAgent(
-        name="TestAgent",
-        base_url=END_POINT,
-        model_name=MODEL,
-        api_key=os.environ.get("DS_KEY", "test"),
-    )
-
-    system_prompt = "你是我的人工智能助手，协助我解答问题和完成任务。"
-    agent.add_system_prompt(system_prompt)
-
-    agent.register_tool(
-        tool_name="get_current_time",
-        tool_function=get_time,
-        tool_description="获取当前时间，无需参数",
-    )
-
-    response = agent.chat("现在美国几点了")
-    print("模型回复：", response)
-
-    response = agent.chat("现在英国又是几点")
-    print("模型回复：", response)
-
-    print("对话历史：", agent.get_history())
-    print(f"Token消耗： {agent.get_token_consumption()}")

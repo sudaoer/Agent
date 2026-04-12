@@ -1,7 +1,7 @@
 from pathlib import Path
 from openai import OpenAI
 import httpx
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Iterable
 import json
 import time
 import logging
@@ -116,7 +116,9 @@ class AgentBase_OpenAIBackend(AgentBase):
     def chat(self, messages: str, log_path: Optional[str] = None) -> str:
         # 如果没有历史记录，则使用系统提示词作为对话的开头
         if len(self.history) == 0:
-            self.history = [{"role": "system", "content": "\n".join(self.system_prompts)}]
+            self.history = [
+                {"role": "system", "content": "\n".join(self.system_prompts)}
+            ]
         self.history.append({"role": "user", "content": messages})
         self.emit_event("user_message", {"content": messages})
 
@@ -230,6 +232,9 @@ class AgentBase_OpenAIBackend(AgentBase):
         if extra_prompt:
             self.add_system_prompt(extra_prompt)
 
+    def register_tool_list(self, tools: Iterable[ToolBase]) -> None:
+        for tool in tools:
+            self.register_tool(tool)
 
     def _handle_tool_call(
         self, tool_call: dict[str, Any], ctx: list[dict[str, Any]]
@@ -242,7 +247,11 @@ class AgentBase_OpenAIBackend(AgentBase):
             tool_args = tool_call["function"]["arguments"]
         self.emit_event(
             "tool_call_start",
-            {"tool_name": tool_name, "arguments": tool_args, "tool_call_id": tool_call["id"]},
+            {
+                "tool_name": tool_name,
+                "arguments": tool_args,
+                "tool_call_id": tool_call["id"],
+            },
         )
         for tool in self.tool_list:
             if tool.toolName == tool_name:
