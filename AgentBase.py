@@ -1,13 +1,17 @@
 from pathlib import Path
+from collections import deque
+from contextlib import contextmanager
 from openai import OpenAI
 import httpx
 from typing import Any, Callable, Optional, Iterable
 import json
 import time
 import logging
+import threading
 from abc import ABC, abstractmethod
 from urllib.parse import urlparse
 from .ToolBase import ToolBase
+from ..ConfigMgr.configMgr import get_max_concurrent_generations, normalize_base_url
 
 
 def get_local_config(config_name: str) -> dict[str, str]:
@@ -37,6 +41,48 @@ class AgentBase(ABC):
 
 class AgentBase_OpenAIBackend(AgentBase):
     _logger = logging.getLogger(__name__)
+    _endpoint_limiters: dict[str, "_EndpointConcurrencyLimiter"] = {}
+    _endpoint_limiters_lock = threading.Lock()
+
+    class _EndpointConcurrencyLimiter:
+        def __init__(self, max_concurrent: int):
+            self.max_concurrent = max_concurrent
+            self._active_count = 0
+            self._next_ticket = 0
+            self._waiting_tickets: deque[int] = deque()
+            self._condition = threading.Condition()
+
+        @contextmanager
+        def acquire(self):
+            ticket = self._enqueue_ticket()
+            try:
+                self._wait_for_turn(ticket)
+                yield
+            finally:
+                self._release_slot()
+
+        def _enqueue_ticket(self) -> int:
+            with self._condition:
+                ticket = self._next_ticket
+                self._next_ticket += 1
+                self._waiting_tickets.append(ticket)
+                return ticket
+
+        def _wait_for_turn(self, ticket: int) -> None:
+            with self._condition:
+                while True:
+                    is_front = len(self._waiting_tickets) > 0 and self._waiting_tickets[0] == ticket
+                    has_capacity = self._active_count < self.max_concurrent
+                    if is_front and has_capacity:
+                        self._waiting_tickets.popleft()
+                        self._active_count += 1
+                        return
+                    self._condition.wait()
+
+        def _release_slot(self) -> None:
+            with self._condition:
+                self._active_count -= 1
+                self._condition.notify_all()
 
     def __init__(
         self,
@@ -53,6 +99,11 @@ class AgentBase_OpenAIBackend(AgentBase):
         self.base_url = base_url
         self.model_name = model_name
         self.api_key = "test_api_key" if api_key is None else api_key
+        self.normalized_base_url = normalize_base_url(self.base_url)
+        self.max_concurrent_generations = get_max_concurrent_generations(
+            self.base_url,
+            self.model_name,
+        )
 
         parsed_base_url = urlparse(self.base_url)
         if parsed_base_url.hostname in {"127.0.0.1", "localhost"}:
@@ -79,6 +130,40 @@ class AgentBase_OpenAIBackend(AgentBase):
         self.token_usage: dict[str, int] = {}
         self.history: list[dict[str, Any]] = []
         self.event_callback: Optional[Callable[[str, dict[str, Any]], None]] = None
+
+    @classmethod
+    def _get_endpoint_limiter(
+        cls,
+        normalized_base_url: str,
+        max_concurrent_generations: int | None,
+    ) -> "_EndpointConcurrencyLimiter | None":
+        if max_concurrent_generations is None:
+            return None
+        with cls._endpoint_limiters_lock:
+            limiter = cls._endpoint_limiters.get(normalized_base_url)
+            if limiter is None:
+                limiter = cls._EndpointConcurrencyLimiter(max_concurrent_generations)
+                cls._endpoint_limiters[normalized_base_url] = limiter
+                return limiter
+            limiter.max_concurrent = max_concurrent_generations
+            return limiter
+
+    @contextmanager
+    def _acquire_generation_slot(self):
+        limiter = self._get_endpoint_limiter(
+            self.normalized_base_url,
+            self.max_concurrent_generations,
+        )
+        if limiter is None:
+            yield
+            return
+        self._logger.debug(
+            "Waiting for generation slot on %s (limit=%s)",
+            self.normalized_base_url,
+            self.max_concurrent_generations,
+        )
+        with limiter.acquire():
+            yield
 
     # 获取当前Agent自创建以来的token消耗量
     def get_token_consumption(self) -> dict[str, int]:
@@ -216,14 +301,15 @@ class AgentBase_OpenAIBackend(AgentBase):
         self.write_history_log(log_path)
         api_history = self._strip_internal_fields(history)
         while True:
-            time_start = time.perf_counter()
-            response = self.openai_client.chat.completions.create(
-                model=self.model_name,
-                messages=api_history,  # type: ignore
-                tools=self.tool_list_jsonready_cache,  # type: ignore
-                extra_body=extra_body,
-            )
-            time_end = time.perf_counter()
+            with self._acquire_generation_slot():
+                time_start = time.perf_counter()
+                response = self.openai_client.chat.completions.create(
+                    model=self.model_name,
+                    messages=api_history,  # type: ignore
+                    tools=self.tool_list_jsonready_cache,  # type: ignore
+                    extra_body=extra_body,
+                )
+                time_end = time.perf_counter()
             this_usage = self._handle_usage(response.usage)
             # 计算token生成速度
             completion_tokens = this_usage.get("completion_tokens", 0)
