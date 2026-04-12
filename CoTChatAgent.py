@@ -26,17 +26,13 @@ class CoTChatAgent(AgentBase_OpenAIBackend):
         extra_body["enable_thinking"] = True
         history_tmp = history
         start_del = False
-        # 删除最后一条user消息之前所有的reasoning_content
+        # 删除最后一条真实用户消息之前所有的reasoning_content
         for i in range(len(history) - 1, -1, -1):
-            if history[i]["role"] == "user":
+            if (
+                history[i]["role"] == "user"
+                and history[i].get("_message_source") != "tool"
+            ):
                 start_del = True
             if start_del and "reasoning_content" in history[i]:
                 del history_tmp[i]["reasoning_content"]
         return super()._post_chatHistory(history_tmp, extra_body, log_path=log_path)
-
-
-def get_time() -> str:
-    import datetime
-
-    return f"现在是北京时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-

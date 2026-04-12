@@ -1,4 +1,5 @@
 from .CoTChatAgent import CoTChatAgent
+from .VisionChatAgent import VisionChatAgent
 from .AgentBase import AgentBase_OpenAIBackend
 from .AliBailian_RESP import AliBailian_RESP_Agent
 from .Skill import Skill
@@ -8,6 +9,7 @@ from .ToolNormal import ToolNormal
 
 __all__ = [
     "CoTChatAgent",
+    "VisionChatAgent",
     "AgentBase_OpenAIBackend",
     "AliBailian_RESP_Agent",
     "Skill",

@@ -6,6 +6,7 @@ import json
 import time
 import logging
 from abc import ABC, abstractmethod
+from urllib.parse import urlparse
 from .ToolBase import ToolBase
 
 
@@ -30,7 +31,7 @@ class AgentBase(ABC):
         pass
 
     @abstractmethod
-    def chat(self, messages: str) -> str:
+    def chat(self, messages: Any) -> str:
         pass
 
 
@@ -52,6 +53,10 @@ class AgentBase_OpenAIBackend(AgentBase):
         self.base_url = base_url
         self.model_name = model_name
         self.api_key = "test_api_key" if api_key is None else api_key
+
+        parsed_base_url = urlparse(self.base_url)
+        if parsed_base_url.hostname in {"127.0.0.1", "localhost"}:
+            proxy = None
 
         self.httpx_client = httpx.Client(proxy=proxy) if proxy else httpx.Client()
         self.openai_client = OpenAI(
@@ -113,14 +118,57 @@ class AgentBase_OpenAIBackend(AgentBase):
                 json.dump(try_parse_json(self.history), f, indent=4, ensure_ascii=False)
 
     # 进行一次对话，输入为用户消息，输出为模型回复，并且处理工具调用并更新对话历史
-    def chat(self, messages: str, log_path: Optional[str] = None) -> str:
+    def _normalize_user_message(
+        self, messages: str | list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        if isinstance(messages, str):
+            return {"role": "user", "content": messages, "_message_source": "user"}
+        else:
+            normalized_content: list[dict[str, Any]] = []
+            for item in messages:
+
+                normalized_item = dict(item)
+                item_type = normalized_item.get("type")
+                if item_type not in {"text", "image_url"}:
+                    raise ValueError(f"Unsupported user content type: {item_type}")
+                if item_type == "image_url":
+                    image_url = normalized_item.get("image_url")
+                    if not isinstance(image_url, dict):
+                        raise ValueError("image_url content must contain an object.")
+                    url = image_url.get("url") # type: ignore
+                    if not isinstance(url, str) or not url.startswith("data:image/"):
+                        raise ValueError(
+                            "Only base64 image data URLs are supported for image input."
+                        )
+                normalized_content.append(normalized_item)
+            return {
+                "role": "user",
+                "content": normalized_content,
+                "_message_source": "user",
+            }
+
+        raise TypeError("messages must be a string or a multimodal content list.")
+
+    def _strip_internal_fields(self, obj: Any) -> Any:
+        if isinstance(obj, list):
+            return [self._strip_internal_fields(item) for item in obj]  # type: ignore 评价为掩耳盗铃
+        if isinstance(obj, dict):
+            return {
+                key: self._strip_internal_fields(value)
+                for key, value in obj.items()  # type: ignore
+                if not key.startswith("_")  # type: ignore
+            }  # type: ignore
+        return obj
+
+    def chat(self, messages: Any, log_path: Optional[str] = None) -> str:
         # 如果没有历史记录，则使用系统提示词作为对话的开头
         if len(self.history) == 0:
             self.history = [
                 {"role": "system", "content": "\n".join(self.system_prompts)}
             ]
-        self.history.append({"role": "user", "content": messages})
-        self.emit_event("user_message", {"content": messages})
+        user_message = self._normalize_user_message(messages)
+        self.history.append(user_message)
+        self.emit_event("user_message", {"content": user_message["content"]})
 
         response = self._post_chatHistory(self.history, log_path=log_path)
 
@@ -166,11 +214,12 @@ class AgentBase_OpenAIBackend(AgentBase):
     ) -> ChatCompletion:
 
         self.write_history_log(log_path)
+        api_history = self._strip_internal_fields(history)
         while True:
             time_start = time.perf_counter()
             response = self.openai_client.chat.completions.create(
                 model=self.model_name,
-                messages=history,  # type: ignore
+                messages=api_history,  # type: ignore
                 tools=self.tool_list_jsonready_cache,  # type: ignore
                 extra_body=extra_body,
             )
@@ -256,7 +305,15 @@ class AgentBase_OpenAIBackend(AgentBase):
         for tool in self.tool_list:
             if tool.toolName == tool_name:
                 new_ctx = tool.execute(tool_call, ctx)
-                tool_result = new_ctx[-1]["content"] if new_ctx else ""
+                tool_result = ""
+                for message in reversed(new_ctx):
+                    if (
+                        isinstance(message, dict) # type: ignore
+                        and message.get("role") == "tool"
+                        and message.get("tool_call_id") == tool_call["id"]
+                    ):
+                        tool_result = str(message.get("content", ""))
+                        break
                 self.emit_event(
                     "tool_call_end",
                     {
