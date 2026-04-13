@@ -13,14 +13,15 @@ class ToolNormal(ToolBase):
 
         # 直接将工具调用信息添加到上下文中，工具的输出由模型根据工具调用信息生成
         ctx.append(
-            self.build_tool_message(
-                tool_call_info["id"],
-                self.run(self.parse_toolcall_arguments(tool_call_info)),
-            )
+            {
+                "role": "tool",
+                "tool_call": tool_call_info["id"],
+                "content": self.run(self.parse_toolcall_arguments(tool_call_info)),
+            }
         )
         return ctx
 
-    # 这个方法由具体的工具实现，接受工具调用信息，返回工具的输出字符串
+    # 这个方法由具体的工具实现，接受工具调用信息，返回工具的输出字符串或者列表
     @abstractmethod
-    def run(self, tool_call_arg: dict[str, Any]) -> str:
+    def run(self, tool_call_arg: dict[str, Any]) -> str | list[dict[str, Any]]:
         pass

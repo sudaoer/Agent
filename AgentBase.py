@@ -71,7 +71,10 @@ class AgentBase_OpenAIBackend(AgentBase):
         def _wait_for_turn(self, ticket: int) -> None:
             with self._condition:
                 while True:
-                    is_front = len(self._waiting_tickets) > 0 and self._waiting_tickets[0] == ticket
+                    is_front = (
+                        len(self._waiting_tickets) > 0
+                        and self._waiting_tickets[0] == ticket
+                    )
                     has_capacity = self._active_count < self.max_concurrent
                     if is_front and has_capacity:
                         self._waiting_tickets.popleft()
@@ -202,12 +205,11 @@ class AgentBase_OpenAIBackend(AgentBase):
             with open(log_path, "w") as f:
                 json.dump(try_parse_json(self.history), f, indent=4, ensure_ascii=False)
 
-    # 进行一次对话，输入为用户消息，输出为模型回复，并且处理工具调用并更新对话历史
     def _normalize_user_message(
         self, messages: str | list[dict[str, Any]]
     ) -> dict[str, Any]:
         if isinstance(messages, str):
-            return {"role": "user", "content": messages, "_message_source": "user"}
+            return {"role": "user", "content": messages}
         else:
             normalized_content: list[dict[str, Any]] = []
             for item in messages:
@@ -220,7 +222,7 @@ class AgentBase_OpenAIBackend(AgentBase):
                     image_url = normalized_item.get("image_url")
                     if not isinstance(image_url, dict):
                         raise ValueError("image_url content must contain an object.")
-                    url = image_url.get("url") # type: ignore
+                    url = image_url.get("url")  # type: ignore
                     if not isinstance(url, str) or not url.startswith("data:image/"):
                         raise ValueError(
                             "Only base64 image data URLs are supported for image input."
@@ -229,22 +231,10 @@ class AgentBase_OpenAIBackend(AgentBase):
             return {
                 "role": "user",
                 "content": normalized_content,
-                "_message_source": "user",
             }
 
-        raise TypeError("messages must be a string or a multimodal content list.")
 
-    def _strip_internal_fields(self, obj: Any) -> Any:
-        if isinstance(obj, list):
-            return [self._strip_internal_fields(item) for item in obj]  # type: ignore 评价为掩耳盗铃
-        if isinstance(obj, dict):
-            return {
-                key: self._strip_internal_fields(value)
-                for key, value in obj.items()  # type: ignore
-                if not key.startswith("_")  # type: ignore
-            }  # type: ignore
-        return obj
-
+    # 进行一次对话，输入为用户消息，输出为模型回复，并且处理工具调用并更新对话历史
     def chat(self, messages: Any, log_path: Optional[str] = None) -> str:
         # 如果没有历史记录，则使用系统提示词作为对话的开头
         if len(self.history) == 0:
@@ -299,7 +289,6 @@ class AgentBase_OpenAIBackend(AgentBase):
     ) -> ChatCompletion:
 
         self.write_history_log(log_path)
-        api_history = self._strip_internal_fields(history)
         while True:
             with self._acquire_generation_slot():
                 time_start = time.perf_counter()
@@ -394,7 +383,7 @@ class AgentBase_OpenAIBackend(AgentBase):
                 tool_result = ""
                 for message in reversed(new_ctx):
                     if (
-                        isinstance(message, dict) # type: ignore
+                        isinstance(message, dict)  # type: ignore
                         and message.get("role") == "tool"
                         and message.get("tool_call_id") == tool_call["id"]
                     ):

@@ -30,7 +30,6 @@ class CoTChatAgent(AgentBase_OpenAIBackend):
         for i in range(len(history) - 1, -1, -1):
             if (
                 history[i]["role"] == "user"
-                and history[i].get("_message_source") != "tool"
             ):
                 start_del = True
             if start_del and "reasoning_content" in history[i]:

@@ -17,45 +17,6 @@ class ToolBase(ABC):
         pass
 
     @staticmethod
-    def build_tool_message(tool_call_id: str, content: str) -> dict[str, Any]:
-        return {
-            "role": "tool",
-            "content": content,
-            "tool_call_id": tool_call_id,
-        }
-
-    @staticmethod
-    def build_user_text_message(text: str) -> dict[str, Any]:
-        return {
-            "role": "user",
-            "content": [{"type": "text", "text": text}],
-            "_message_source": "tool",
-        }
-
-    @staticmethod
-    def build_user_image_message(
-        text: str, data_url: str, detail: str = "auto"
-    ) -> dict[str, Any]:
-        content: list[dict[str, Any]] = []
-        if text.strip():
-            content.append({"type": "text", "text": text})
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": data_url,
-                    "detail": detail,
-                },
-            }
-        )
-        return {
-            "role": "user",
-            "content": content,
-            "_message_source": "tool",
-        }
-        
-
-    @staticmethod
     def pyType_to_jsonType(py_type: type) -> str:
         if py_type == str:
             return "string"
