@@ -294,7 +294,7 @@ class AgentBase_OpenAIBackend(AgentBase):
                 time_start = time.perf_counter()
                 response = self.openai_client.chat.completions.create(
                     model=self.model_name,
-                    messages=api_history,  # type: ignore
+                    messages=history,  # type: ignore
                     tools=self.tool_list_jsonready_cache,  # type: ignore
                     extra_body=extra_body,
                 )

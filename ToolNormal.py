@@ -15,7 +15,7 @@ class ToolNormal(ToolBase):
         ctx.append(
             {
                 "role": "tool",
-                "tool_call": tool_call_info["id"],
+                "tool_call_id": tool_call_info["id"],
                 "content": self.run(self.parse_toolcall_arguments(tool_call_info)),
             }
         )
