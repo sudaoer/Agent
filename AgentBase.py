@@ -2,7 +2,7 @@ from pathlib import Path
 from collections import deque
 from contextlib import contextmanager
 from copy import deepcopy
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 import httpx
 from typing import Any, Callable, Optional, Iterable, cast
 import json
@@ -12,7 +12,11 @@ import threading
 from abc import ABC, abstractmethod
 from urllib.parse import urlparse
 from .ToolBase import ToolBase
-from ..ConfigMgr.configMgr import get_max_concurrent_generations, normalize_base_url
+from ..ConfigMgr.configMgr import (
+    get_max_concurrent_generations,
+    get_min_request_interval_seconds,
+    normalize_base_url,
+)
 
 
 def get_local_config(config_name: str) -> dict[str, str]:
@@ -47,11 +51,15 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
     _ALIYUN_EXPLICIT_CACHE_ROLES = {"system", "user", "assistant", "tool"}
 
     class _EndpointConcurrencyLimiter:
-        def __init__(self, max_concurrent: int):
+        def __init__(self, max_concurrent: int, min_request_interval_seconds: float):
             self.max_concurrent = max_concurrent
+            self.min_request_interval_seconds = min_request_interval_seconds
             self._active_count = 0
             self._next_ticket = 0
             self._waiting_tickets: deque[int] = deque()
+            self._next_request_time = 0.0
+            self._blocked_until = 0.0
+            self._consecutive_rate_limits = 0
             self._condition = threading.Condition()
 
         @contextmanager
@@ -73,20 +81,58 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         def _wait_for_turn(self, ticket: int) -> None:
             with self._condition:
                 while True:
+                    now = time.monotonic()
                     is_front = (
                         len(self._waiting_tickets) > 0
                         and self._waiting_tickets[0] == ticket
                     )
                     has_capacity = self._active_count < self.max_concurrent
-                    if is_front and has_capacity:
+                    earliest_allowed_time = max(
+                        self._next_request_time,
+                        self._blocked_until,
+                    )
+                    wait_seconds = max(0.0, earliest_allowed_time - now)
+                    if is_front and has_capacity and wait_seconds <= 0:
                         self._waiting_tickets.popleft()
                         self._active_count += 1
+                        self._next_request_time = (
+                            now + self.min_request_interval_seconds
+                        )
                         return
-                    self._condition.wait()
+                    self._condition.wait(
+                        timeout=wait_seconds if wait_seconds > 0 else None
+                    )
 
         def _release_slot(self) -> None:
             with self._condition:
                 self._active_count -= 1
+                self._condition.notify_all()
+
+        def record_rate_limit(
+            self,
+            retry_after_seconds: float | None,
+        ) -> float:
+            with self._condition:
+                self._consecutive_rate_limits += 1
+                exponential_backoff = min(
+                    0.5 * (2 ** (self._consecutive_rate_limits - 1)),
+                    8.0,
+                )
+                wait_seconds = max(
+                    retry_after_seconds or 0.0,
+                    exponential_backoff,
+                    self.min_request_interval_seconds,
+                )
+                self._blocked_until = max(
+                    self._blocked_until,
+                    time.monotonic() + wait_seconds,
+                )
+                self._condition.notify_all()
+                return wait_seconds
+
+        def record_success(self) -> None:
+            with self._condition:
+                self._consecutive_rate_limits = 0
                 self._condition.notify_all()
 
     def __init__(
@@ -106,6 +152,10 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         self.api_key = "test_api_key" if api_key is None else api_key
         self.normalized_base_url = normalize_base_url(self.base_url)
         self.max_concurrent_generations = get_max_concurrent_generations(
+            self.base_url,
+            self.model_name,
+        )
+        self.min_request_interval_seconds = get_min_request_interval_seconds(
             self.base_url,
             self.model_name,
         )
@@ -141,16 +191,21 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         cls,
         normalized_base_url: str,
         max_concurrent_generations: int | None,
+        min_request_interval_seconds: float,
     ) -> "_EndpointConcurrencyLimiter | None":
         if max_concurrent_generations is None:
             return None
         with cls._endpoint_limiters_lock:
             limiter = cls._endpoint_limiters.get(normalized_base_url)
             if limiter is None:
-                limiter = cls._EndpointConcurrencyLimiter(max_concurrent_generations)
+                limiter = cls._EndpointConcurrencyLimiter(
+                    max_concurrent_generations,
+                    min_request_interval_seconds,
+                )
                 cls._endpoint_limiters[normalized_base_url] = limiter
                 return limiter
             limiter.max_concurrent = max_concurrent_generations
+            limiter.min_request_interval_seconds = min_request_interval_seconds
             return limiter
 
     @contextmanager
@@ -158,6 +213,7 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         limiter = self._get_endpoint_limiter(
             self.normalized_base_url,
             self.max_concurrent_generations,
+            self.min_request_interval_seconds,
         )
         if limiter is None:
             yield
@@ -169,6 +225,26 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         )
         with limiter.acquire():
             yield
+
+    def _get_active_endpoint_limiter(self) -> "_EndpointConcurrencyLimiter | None":
+        return self._get_endpoint_limiter(
+            self.normalized_base_url,
+            self.max_concurrent_generations,
+            self.min_request_interval_seconds,
+        )
+
+    @staticmethod
+    def _extract_retry_after_seconds(response: httpx.Response | None) -> float | None:
+        if response is None:
+            return None
+        retry_after = response.headers.get("retry-after")
+        if retry_after is None:
+            return None
+        try:
+            parsed = float(retry_after.strip())
+        except ValueError:
+            return None
+        return max(0.0, parsed)
 
     # 获取当前Agent自创建以来的token消耗量
     def get_token_consumption(self) -> dict[str, int]:
@@ -338,21 +414,45 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
     ) -> ChatCompletion:
 
         self.write_history_log(log_path)
+        rate_limit_attempts = 0
         while True:
-            with self._acquire_generation_slot():
-                time_start = time.perf_counter()
-                request_messages = history
-                if self._is_aliyun_compatible_host():
-                    request_messages = self._build_aliyun_explicit_cache_messages(
-                        history
+            try:
+                with self._acquire_generation_slot():
+                    time_start = time.perf_counter()
+                    request_messages = history
+                    if self._is_aliyun_compatible_host():
+                        request_messages = self._build_aliyun_explicit_cache_messages(
+                            history
+                        )
+                    response = self.openai_client.chat.completions.create(
+                        model=self.model_name,
+                        messages=request_messages,  # type: ignore
+                        tools=self.tool_list_jsonready_cache,  # type: ignore
+                        extra_body=extra_body,
                     )
-                response = self.openai_client.chat.completions.create(
-                    model=self.model_name,
-                    messages=request_messages,  # type: ignore
-                    tools=self.tool_list_jsonready_cache,  # type: ignore
-                    extra_body=extra_body,
+                    time_end = time.perf_counter()
+            except RateLimitError as exc:
+                rate_limit_attempts += 1
+                limiter = self._get_active_endpoint_limiter()
+                retry_after_seconds = self._extract_retry_after_seconds(exc.response)
+                wait_seconds = max(
+                    retry_after_seconds or 0.0,
+                    min(0.5 * (2 ** (rate_limit_attempts - 1)), 8.0),
                 )
-                time_end = time.perf_counter()
+                if limiter is not None:
+                    wait_seconds = limiter.record_rate_limit(retry_after_seconds)
+                self._logger.warning(
+                    "Rate limited on %s, retrying in %.2fs (attempt=%s)",
+                    self.normalized_base_url,
+                    wait_seconds,
+                    rate_limit_attempts,
+                )
+                time.sleep(wait_seconds)
+                continue
+            limiter = self._get_active_endpoint_limiter()
+            if limiter is not None:
+                limiter.record_success()
+            rate_limit_attempts = 0
             this_usage = self._handle_usage(response.usage)
             # 计算token生成速度
             completion_tokens = this_usage.get("completion_tokens", 0)

@@ -8,7 +8,7 @@ from openai import OpenAI
 from .AgentBase import AgentBase, get_local_config
 from .ToolBase import ToolBase
 
-
+#基本没用啊，鉴于阿里云该死的不知道为什么原因，RESP在用工具的情况下没有上下文缓存可言
 class AliBailian_RESP_Agent(AgentBase):
     _logger = logging.getLogger(__name__)
 
