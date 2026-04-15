@@ -1,9 +1,10 @@
 from pathlib import Path
 from collections import deque
 from contextlib import contextmanager
+from copy import deepcopy
 from openai import OpenAI
 import httpx
-from typing import Any, Callable, Optional, Iterable
+from typing import Any, Callable, Optional, Iterable, cast
 import json
 import time
 import logging
@@ -39,10 +40,11 @@ class AgentBase(ABC):
         pass
 
 
-class AgentBase_OpenAIBackend(AgentBase):
+class Agent_OpenAIChat_API_Backend(AgentBase):
     _logger = logging.getLogger(__name__)
     _endpoint_limiters: dict[str, "_EndpointConcurrencyLimiter"] = {}
     _endpoint_limiters_lock = threading.Lock()
+    _ALIYUN_EXPLICIT_CACHE_ROLES = {"system", "user", "assistant", "tool"}
 
     class _EndpointConcurrencyLimiter:
         def __init__(self, max_concurrent: int):
@@ -185,6 +187,10 @@ class AgentBase_OpenAIBackend(AgentBase):
         if self.event_callback is not None:
             self.event_callback(event_type, payload)
 
+    def _is_aliyun_compatible_host(self) -> bool:
+        hostname = urlparse(self.base_url).hostname
+        return isinstance(hostname, str) and "aliyun" in hostname.lower()
+
     def write_history_log(self, log_path: Optional[str]) -> None:
         if log_path is not None:
 
@@ -232,6 +238,49 @@ class AgentBase_OpenAIBackend(AgentBase):
                 "role": "user",
                 "content": normalized_content,
             }
+
+    def _build_aliyun_explicit_cache_messages(
+        self, history: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        request_messages = deepcopy(history)
+
+        for message in reversed(request_messages):
+            if message.get("role") not in self._ALIYUN_EXPLICIT_CACHE_ROLES:
+                continue
+
+            content = message.get("content")
+            if isinstance(content, str):
+                message["content"] = [
+                    {
+                        "type": "text",
+                        "text": content,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+                return request_messages
+
+            if isinstance(content, list) and len(cast(list[Any],content)) > 0:
+                if not all(isinstance(item, dict) for item in content): # type: ignore
+                    self._logger.debug(
+                        "Skipping Aliyun explicit cache marker because the trailing content list is not dict-only."
+                    )
+                    return request_messages 
+                last_content_block = content[-1] # type: ignore
+                if not isinstance(last_content_block, dict):
+                    self._logger.debug(
+                        "Skipping Aliyun explicit cache marker because the trailing content block is not a dictionary."
+                    )
+                    return request_messages
+                last_content_block["cache_control"] = {"type": "ephemeral"}
+                return request_messages
+
+            self._logger.debug(
+                "Skipping Aliyun explicit cache marker because trailing %s message content is not safely rewritable.",
+                message.get("role"),
+            )
+            return request_messages
+
+        return request_messages
 
 
     # 进行一次对话，输入为用户消息，输出为模型回复，并且处理工具调用并更新对话历史
@@ -292,9 +341,14 @@ class AgentBase_OpenAIBackend(AgentBase):
         while True:
             with self._acquire_generation_slot():
                 time_start = time.perf_counter()
+                request_messages = history
+                if self._is_aliyun_compatible_host():
+                    request_messages = self._build_aliyun_explicit_cache_messages(
+                        history
+                    )
                 response = self.openai_client.chat.completions.create(
                     model=self.model_name,
-                    messages=history,  # type: ignore
+                    messages=request_messages,  # type: ignore
                     tools=self.tool_list_jsonready_cache,  # type: ignore
                     extra_body=extra_body,
                 )
@@ -336,17 +390,26 @@ class AgentBase_OpenAIBackend(AgentBase):
 
     from openai.types.completion_usage import CompletionUsage
 
+    @staticmethod
+    def _accumulate_usage_counts(
+        target: dict[str, int], usage_dict: dict[str, Any]
+    ) -> None:
+        for key, value in usage_dict.items():
+            if isinstance(value, int):
+                target[key] = target.get(key, 0) + value
+                continue
+            if not isinstance(value, dict):
+                continue
+            value = cast(dict[str, Any], value)
+            for sub_key, sub_value in value.items():
+                if isinstance(sub_value, int):
+                    target[sub_key] = target.get(sub_key, 0) + sub_value
+
     def _handle_usage(self, usage: Optional[CompletionUsage]) -> dict[str, Any]:
         if usage is None:
             return {}
         usage_dict = usage.model_dump()
-        for k, v in usage_dict.items():
-            if isinstance(v, int):
-                self.token_usage[k] = self.token_usage.get(k, 0) + v
-            elif isinstance(v, dict):
-                for sub_k, sub_v in v.items():  # type: ignore
-                    if isinstance(sub_v, int):
-                        self.token_usage[sub_k] = self.token_usage.get(sub_k, 0) + sub_v  # type: ignore
+        self._accumulate_usage_counts(self.token_usage, usage_dict)
         return usage_dict
 
     def register_tool(self, tool: ToolBase) -> None:

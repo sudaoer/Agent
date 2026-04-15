@@ -2,10 +2,10 @@
 from typing import Any, Optional
 
 from openai.types.chat.chat_completion import ChatCompletion
-from .AgentBase import AgentBase_OpenAIBackend
+from .AgentBase import Agent_OpenAIChat_API_Backend
 
 
-class CoTChatAgent(AgentBase_OpenAIBackend):
+class CoTChatAgent(Agent_OpenAIChat_API_Backend):
     def __init__(
         self,
         name: str,
