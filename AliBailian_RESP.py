@@ -442,6 +442,19 @@ class AliBailian_RESP_Agent(AgentBase):
             request_kwargs["tools"] = self.tool_list_jsonready_cache
         return request_kwargs
 
+    def chat_stream(
+        self,
+        messages: Any,
+        *,
+        log_path: Optional[str] = None,
+        extra_body: dict[str, Any] | None = None,
+        stream_options: dict[str, Any] | None = None,
+    ) -> str:
+        del messages, log_path, extra_body, stream_options
+        raise NotImplementedError(
+            "AliBailian_RESP_Agent does not support chat_stream()."
+        )
+
     def chat(self, messages: Any, log_path: Optional[str] = None) -> str:
         user_message = self._normalize_user_message(messages)
         self.history.append(user_message)

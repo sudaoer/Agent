@@ -3,6 +3,9 @@ from collections import deque
 from contextlib import contextmanager
 from copy import deepcopy
 from openai import OpenAI, RateLimitError
+from openai.types.chat.chat_completion import ChatCompletion
+from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
+from openai.types.completion_usage import CompletionUsage
 import httpx
 from typing import Any, Callable, Optional, Iterable, cast
 import json
@@ -42,6 +45,18 @@ class AgentBase(ABC):
     @abstractmethod
     def chat(self, messages: Any) -> str:
         pass
+
+    def chat_stream(
+        self,
+        messages: Any,
+        *,
+        log_path: str | None = None,
+        extra_body: dict[str, Any] | None = None,
+        stream_options: dict[str, Any] | None = None,
+    ) -> str:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support chat_stream()."
+        )
 
 
 class Agent_OpenAIChat_API_Backend(AgentBase):
@@ -358,14 +373,97 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
 
         return request_messages
 
+    def _prepare_chat_request(
+        self,
+        history: list[dict[str, Any]],
+        extra_body: Optional[dict[str, Any]] = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        return history, dict(extra_body) if extra_body is not None else {}
+
+    def _build_chat_completion_kwargs(
+        self,
+        history: list[dict[str, Any]],
+        extra_body: Optional[dict[str, Any]] = None,
+        *,
+        stream: bool = False,
+        stream_options: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        request_history, request_extra_body = self._prepare_chat_request(
+            history, extra_body
+        )
+        request_messages = request_history
+        if self._is_aliyun_compatible_host():
+            request_messages = self._build_aliyun_explicit_cache_messages(
+                request_history
+            )
+
+        request_kwargs: dict[str, Any] = {
+            "model": self.model_name,
+            "messages": request_messages,
+            "extra_body": request_extra_body or None,
+        }
+        if self.tool_list_jsonready_cache:
+            request_kwargs["tools"] = self.tool_list_jsonready_cache
+        if stream:
+            resolved_stream_options = {"include_usage": True}
+            if stream_options is not None:
+                resolved_stream_options.update(stream_options)
+            request_kwargs["stream"] = True
+            request_kwargs["stream_options"] = resolved_stream_options
+        return request_kwargs
+
+    def _emit_model_response_metrics(
+        self,
+        usage_dict: dict[str, Any],
+        *,
+        time_start: float,
+        time_end: float,
+    ) -> None:
+        completion_tokens = usage_dict.get("completion_tokens", 0)
+        time_cost = time_end - time_start
+        tokens_per_second = completion_tokens / time_cost if time_cost > 0 else 0
+        self._logger.info(f"{tokens_per_second:.2f} tokens/s, use time {time_cost:.2f}s")
+        self.emit_event(
+            "model_response",
+            {
+                "usage": usage_dict,
+                "time_cost": time_cost,
+                "tokens_per_second": tokens_per_second,
+            },
+        )
+
+    @staticmethod
+    def _tool_calls_are_valid(response: ChatCompletion) -> bool:
+        for tool_call in response.choices[0].message.tool_calls or []:
+            tool_arg = tool_call.function.arguments  # type: ignore[assignment]
+            try:
+                parsed_tool_arg = json.loads(tool_arg)  # type: ignore[arg-type]
+                if not isinstance(parsed_tool_arg, dict):
+                    raise ValueError("工具参数应该是一个JSON对象格式的字符串")
+            except Exception:
+                return False
+        return True
+
+    @staticmethod
+    def _extract_reasoning_content(delta: Any) -> str:
+        model_extra = getattr(delta, "model_extra", None)
+        if isinstance(model_extra, dict):
+            value = model_extra.get("reasoning_content")
+            if isinstance(value, str):
+                return value
+        value = getattr(delta, "reasoning_content", None)
+        if isinstance(value, str):
+            return value
+        return ""
+
+    def _ensure_history_initialized(self) -> None:
+        if len(self.history) == 0:
+            self.history = [{"role": "system", "content": "\n".join(self.system_prompts)}]
+
 
     # 进行一次对话，输入为用户消息，输出为模型回复，并且处理工具调用并更新对话历史
     def chat(self, messages: Any, log_path: Optional[str] = None) -> str:
-        # 如果没有历史记录，则使用系统提示词作为对话的开头
-        if len(self.history) == 0:
-            self.history = [
-                {"role": "system", "content": "\n".join(self.system_prompts)}
-            ]
+        self._ensure_history_initialized()
         user_message = self._normalize_user_message(messages)
         self.history.append(user_message)
         self.emit_event("user_message", {"content": user_message["content"]})
@@ -399,12 +497,40 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         self.write_history_log(log_path)
         return assistant_reply
 
+    def chat_stream(
+        self,
+        messages: Any,
+        *,
+        log_path: Optional[str] = None,
+        extra_body: Optional[dict[str, Any]] = None,
+        stream_options: Optional[dict[str, Any]] = None,
+    ) -> str:
+        self._ensure_history_initialized()
+        user_message = self._normalize_user_message(messages)
+        self.history.append(user_message)
+        self.emit_event("user_message", {"content": user_message["content"]})
+
+        assistant_reply, reasoning_content = self._stream_chatHistory(
+            self.history,
+            extra_body=extra_body,
+            log_path=log_path,
+            stream_options=stream_options,
+        )
+        assistant_message: dict[str, Any] = {
+            "role": "assistant",
+            "content": assistant_reply,
+        }
+        if reasoning_content:
+            assistant_message["reasoning_content"] = reasoning_content
+        self.history.append(assistant_message)
+        self.emit_event("assistant_message", {"content": assistant_reply})
+        self.write_history_log(log_path)
+        return assistant_reply
+
     # 获取当前Agent的对话历史，返回一个列表，每个元素是一个字典
     # 分别表示消息的角色（如"user"或"assistant"）和消息内容
     def get_history(self) -> list[dict[str, Any]]:
         return self.history
-
-    from openai.types.chat.chat_completion import ChatCompletion
 
     def _post_chatHistory(
         self,
@@ -414,21 +540,14 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
     ) -> ChatCompletion:
 
         self.write_history_log(log_path)
+        request_kwargs = self._build_chat_completion_kwargs(history, extra_body)
         rate_limit_attempts = 0
         while True:
             try:
                 with self._acquire_generation_slot():
                     time_start = time.perf_counter()
-                    request_messages = history
-                    if self._is_aliyun_compatible_host():
-                        request_messages = self._build_aliyun_explicit_cache_messages(
-                            history
-                        )
                     response = self.openai_client.chat.completions.create(
-                        model=self.model_name,
-                        messages=request_messages,  # type: ignore
-                        tools=self.tool_list_jsonready_cache,  # type: ignore
-                        extra_body=extra_body,
+                        **request_kwargs
                     )
                     time_end = time.perf_counter()
             except RateLimitError as exc:
@@ -454,41 +573,104 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
                 limiter.record_success()
             rate_limit_attempts = 0
             this_usage = self._handle_usage(response.usage)
-            # 计算token生成速度
-            completion_tokens = this_usage.get("completion_tokens", 0)
-            time_cost = time_end - time_start
-            tokens_per_second = completion_tokens / time_cost if time_cost > 0 else 0
-            self._logger.info(
-                f"{tokens_per_second:.2f} tokens/s, use time {time_cost:.2f}s"
+            self._emit_model_response_metrics(
+                this_usage,
+                time_start=time_start,
+                time_end=time_end,
             )
-            self.emit_event(
-                "model_response",
-                {
-                    "usage": this_usage,
-                    "time_cost": time_cost,
-                    "tokens_per_second": tokens_per_second,
-                },
-            )
-            # 检测toolcall是否合法
-            all_tool_calls_valid = True
-            for tool_call in response.choices[0].message.tool_calls or []:
-                tool_arg = tool_call.function.arguments  # type: ignore
-                try:
-                    tool_arg = json.loads(tool_arg)  # type: ignore
-                    if not isinstance(tool_arg, dict):  # type: ignore
-                        raise ValueError("工具参数应该是一个JSON对象格式的字符串")
-                except Exception as e:
-                    all_tool_calls_valid = False
-                    self._logger.error(
-                        f"Invalid tool call arguments: {tool_arg}, error: {e}\nRetrying..."
-                    )
-                    break
-            if all_tool_calls_valid:
+            if self._tool_calls_are_valid(response):
                 break
+            invalid_arg = response.choices[0].message.tool_calls[0].function.arguments
+            self._logger.error("Invalid tool call arguments: %s\nRetrying...", invalid_arg)
 
         return response
 
-    from openai.types.completion_usage import CompletionUsage
+    def _stream_chatHistory(
+        self,
+        history: list[dict[str, Any]],
+        extra_body: Optional[dict[str, Any]] = None,
+        log_path: Optional[str] = None,
+        stream_options: Optional[dict[str, Any]] = None,
+    ) -> tuple[str, str]:
+        self.write_history_log(log_path)
+        request_kwargs = self._build_chat_completion_kwargs(
+            history,
+            extra_body,
+            stream=True,
+            stream_options=stream_options,
+        )
+        rate_limit_attempts = 0
+        while True:
+            try:
+                with self._acquire_generation_slot():
+                    time_start = time.perf_counter()
+                    stream_response = self.openai_client.chat.completions.create(
+                        **request_kwargs
+                    )
+                    assistant_parts: list[str] = []
+                    reasoning_parts: list[str] = []
+                    usage_dict: dict[str, Any] = {}
+                    try:
+                        for chunk in cast(Iterable[ChatCompletionChunk], stream_response):
+                            if chunk.usage is not None:
+                                usage_dict = self._handle_usage(chunk.usage)
+                            for choice in chunk.choices:
+                                delta = choice.delta
+                                reasoning_delta = self._extract_reasoning_content(delta)
+                                if reasoning_delta:
+                                    reasoning_parts.append(reasoning_delta)
+                                    self.emit_event(
+                                        "assistant_reasoning_delta",
+                                        {"content": reasoning_delta},
+                                    )
+                                if (
+                                    delta.tool_calls is not None
+                                    or delta.function_call is not None
+                                    or choice.finish_reason == "tool_calls"
+                                ):
+                                    raise RuntimeError(
+                                        "chat_stream() v1 does not support streamed tool calls."
+                                    )
+                                content_delta = delta.content
+                                if content_delta:
+                                    assistant_parts.append(content_delta)
+                                    self.emit_event(
+                                        "assistant_delta",
+                                        {"content": content_delta},
+                                    )
+                    finally:
+                        close_stream = getattr(stream_response, "close", None)
+                        if callable(close_stream):
+                            close_stream()
+                    time_end = time.perf_counter()
+            except RateLimitError as exc:
+                rate_limit_attempts += 1
+                limiter = self._get_active_endpoint_limiter()
+                retry_after_seconds = self._extract_retry_after_seconds(exc.response)
+                wait_seconds = max(
+                    retry_after_seconds or 0.0,
+                    min(0.5 * (2 ** (rate_limit_attempts - 1)), 8.0),
+                )
+                if limiter is not None:
+                    wait_seconds = limiter.record_rate_limit(retry_after_seconds)
+                self._logger.warning(
+                    "Rate limited on %s, retrying in %.2fs (attempt=%s)",
+                    self.normalized_base_url,
+                    wait_seconds,
+                    rate_limit_attempts,
+                )
+                time.sleep(wait_seconds)
+                continue
+            limiter = self._get_active_endpoint_limiter()
+            if limiter is not None:
+                limiter.record_success()
+            rate_limit_attempts = 0
+            self._emit_model_response_metrics(
+                usage_dict,
+                time_start=time_start,
+                time_end=time_end,
+            )
+            return "".join(assistant_parts), "".join(reasoning_parts)
 
     @staticmethod
     def _accumulate_usage_counts(
