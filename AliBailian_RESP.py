@@ -58,9 +58,11 @@ class AliBailian_RESP_Agent(AgentBase):
                 except Exception:
                     return obj
             if isinstance(obj, list):
-                return [try_parse_json(item) for item in obj]
+                obj_list = cast(list[Any], obj)
+                return [try_parse_json(item) for item in obj_list]
             if isinstance(obj, dict):
-                return {key: try_parse_json(value) for key, value in obj.items()}
+                obj_dict = cast(dict[str, Any], obj)
+                return {key: try_parse_json(value) for key, value in obj_dict.items()}
             return obj
 
         with open(log_path, "w") as f:
@@ -145,13 +147,18 @@ class AliBailian_RESP_Agent(AgentBase):
                 "content": [{"type": "input_text", "text": user_message}],
             }
 
-        if not isinstance(messages, list) or len(messages) == 0:
+        raw_messages_any: Any = messages
+        if not isinstance(raw_messages_any, list):
+            raise ValueError("Input message list should not be empty.")
+        raw_messages = cast(list[Any], raw_messages_any)
+        if len(raw_messages) == 0:
             raise ValueError("Input message list should not be empty.")
 
         normalized_content: list[dict[str, Any]] = []
-        for item in messages:
-            if not isinstance(item, dict):
+        for item_raw in raw_messages:
+            if not isinstance(item_raw, dict):
                 raise ValueError("Each message content item must be a dictionary.")
+            item = cast(dict[str, Any], item_raw)
             normalized_item = dict(item)
             item_type = normalized_item.get("type")
 
@@ -174,7 +181,8 @@ class AliBailian_RESP_Agent(AgentBase):
             if item_type == "image_url":
                 image_url = normalized_item.get("image_url")
                 if isinstance(image_url, dict):
-                    image_url = image_url.get("url")
+                    image_url_dict = cast(dict[str, Any], image_url)
+                    image_url = image_url_dict.get("url")
                 if not isinstance(image_url, str) or image_url.strip() == "":
                     raise ValueError("image_url content must contain a non-empty URL.")
                 normalized_content.append(
@@ -211,15 +219,14 @@ class AliBailian_RESP_Agent(AgentBase):
             return message
 
         content = message["content"]
-        if (
-            isinstance(content, list)
-            and len(content) == 1
-            and isinstance(content[0], dict)
-            and content[0].get("type") == "input_text"
-        ):
-            text = content[0].get("text")
-            if isinstance(text, str):
-                return {"role": "user", "content": text}
+        if isinstance(content, list):
+            content_list = cast(list[Any], content)
+            if len(content_list) == 1 and isinstance(content_list[0], dict):
+                first_block = cast(dict[str, Any], content_list[0])
+                if first_block.get("type") == "input_text":
+                    text = first_block.get("text")
+                    if isinstance(text, str):
+                        return {"role": "user", "content": text}
         return {"role": "user", "content": content}
 
     def _extract_response_text(self, response: dict[str, Any]) -> str:
@@ -257,8 +264,9 @@ class AliBailian_RESP_Agent(AgentBase):
         output_raw = response.get("output")
         if not isinstance(output_raw, list):
             return []
+        output = cast(list[Any], output_raw)
         function_calls: list[dict[str, Any]] = []
-        for output_item_raw in output_raw:
+        for output_item_raw in output:
             if not isinstance(output_item_raw, dict):
                 continue
             output_item = cast(dict[str, Any], output_item_raw)
@@ -271,7 +279,8 @@ class AliBailian_RESP_Agent(AgentBase):
         output_raw = response.get("output")
         if not isinstance(output_raw, list):
             return
-        for output_item_raw in output_raw:
+        output = cast(list[Any], output_raw)
+        for output_item_raw in output:
             if not isinstance(output_item_raw, dict):
                 continue
             output_item = cast(dict[str, Any], output_item_raw)
@@ -285,13 +294,15 @@ class AliBailian_RESP_Agent(AgentBase):
             return result
 
         if isinstance(result, list):
+            result_list = cast(list[Any], result)
             text_parts: list[str] = []
             image_omitted = False
             content_like = True
-            for item in result:
-                if not isinstance(item, dict):
+            for item_raw in result_list:
+                if not isinstance(item_raw, dict):
                     content_like = False
                     break
+                item = cast(dict[str, Any], item_raw)
                 item_type = item.get("type")
                 if item_type in {"text", "input_text"}:
                     text = item.get("text")
@@ -325,23 +336,25 @@ class AliBailian_RESP_Agent(AgentBase):
         if usage is None:
             return {}
         if hasattr(usage, "model_dump"):
-            usage_dict = usage.model_dump()
+            usage_dict_raw = usage.model_dump()
         elif isinstance(usage, dict):
-            usage_dict = usage
+            usage_dict_raw = cast(dict[str, Any], usage)
         else:
             return {}
 
-        if not isinstance(usage_dict, dict):
+        if not isinstance(usage_dict_raw, dict):
             return {}
+        usage_dict = cast(dict[str, Any], usage_dict_raw)
 
         for k, v in usage_dict.items():
             if isinstance(v, int):
                 self.token_usage[k] = self.token_usage.get(k, 0) + v
             elif isinstance(v, dict):
-                for sub_k, sub_v in v.items():
+                nested_usage = cast(dict[str, Any], v)
+                for sub_k, sub_v in nested_usage.items():
                     if isinstance(sub_v, int):
                         self.token_usage[sub_k] = self.token_usage.get(sub_k, 0) + sub_v
-        return cast(dict[str, Any], usage_dict)
+        return usage_dict
 
     def _build_tool_call_info(self, function_call: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -382,8 +395,7 @@ class AliBailian_RESP_Agent(AgentBase):
             tool_payload = ""
             for message in reversed(new_ctx):
                 if (
-                    isinstance(message, dict)
-                    and message.get("role") == "tool"
+                    message.get("role") == "tool"
                     and message.get("tool_call_id") == tool_call_info["id"]
                 ):
                     tool_payload = self._stringify_tool_result(

@@ -448,7 +448,8 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
     def _extract_reasoning_content(delta: Any) -> str:
         model_extra = getattr(delta, "model_extra", None)
         if isinstance(model_extra, dict):
-            value = model_extra.get("reasoning_content")
+            model_extra_dict = cast(dict[str, Any], model_extra)
+            value = model_extra_dict.get("reasoning_content")
             if isinstance(value, str):
                 return value
         value = getattr(delta, "reasoning_content", None)
@@ -546,8 +547,9 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
             try:
                 with self._acquire_generation_slot():
                     time_start = time.perf_counter()
-                    response = self.openai_client.chat.completions.create(
-                        **request_kwargs
+                    response = cast(
+                        ChatCompletion,
+                        self.openai_client.chat.completions.create(**request_kwargs),
                     )
                     time_end = time.perf_counter()
             except RateLimitError as exc:
@@ -580,7 +582,18 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
             )
             if self._tool_calls_are_valid(response):
                 break
-            invalid_arg = response.choices[0].message.tool_calls[0].function.arguments
+            tool_calls = response.choices[0].message.tool_calls or []
+            invalid_arg = "<missing>"
+            if len(tool_calls) > 0:
+                tool_call_payload = tool_calls[0].model_dump()
+                raw_function_payload = tool_call_payload.get("function")
+                if isinstance(raw_function_payload, dict):
+                    function_payload = cast(dict[str, Any], raw_function_payload)
+                    arguments: Any = function_payload.get("arguments")
+                    if isinstance(arguments, str):
+                        invalid_arg = arguments
+                    elif arguments is not None:
+                        invalid_arg = str(arguments)
             self._logger.error("Invalid tool call arguments: %s\nRetrying...", invalid_arg)
 
         return response
@@ -604,14 +617,15 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
             try:
                 with self._acquire_generation_slot():
                     time_start = time.perf_counter()
-                    stream_response = self.openai_client.chat.completions.create(
-                        **request_kwargs
+                    stream_response = cast(
+                        Iterable[ChatCompletionChunk],
+                        self.openai_client.chat.completions.create(**request_kwargs),
                     )
                     assistant_parts: list[str] = []
                     reasoning_parts: list[str] = []
                     usage_dict: dict[str, Any] = {}
                     try:
-                        for chunk in cast(Iterable[ChatCompletionChunk], stream_response):
+                        for chunk in stream_response:
                             if chunk.usage is not None:
                                 usage_dict = self._handle_usage(chunk.usage)
                             for choice in chunk.choices:
