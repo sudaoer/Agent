@@ -5,18 +5,17 @@ from typing import Any, Callable, Iterable, Optional, cast
 
 from openai import OpenAI
 
-from .AgentBase import AgentBase, get_local_config
+from .AgentBase import AgentBase
 from .ToolBase import ToolBase
+from ..ConfigMgr import get_baseurl_key
 
 #基本没用啊，鉴于阿里云该死的不知道为什么原因，RESP在用工具的情况下没有上下文缓存可言
 class AliBailian_RESP_Agent(AgentBase):
     _logger = logging.getLogger(__name__)
 
-    def __init__(self):
-        cfg = get_local_config("AliBailian-qwen3.6-plus")
-        self.model_name = cfg["model"]
-        self.api_key = cfg["api_key"]
-        self.base_url = cfg["base_url"]
+    def __init__(self, model_name: str = "qwen3.6-plus"):
+        self.model_name = model_name
+        self.base_url, self.api_key = get_baseurl_key(model_name)
 
         self._logger.setLevel(logging.DEBUG)
         self.client = OpenAI(base_url=self.base_url, api_key=self.api_key)
