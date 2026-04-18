@@ -17,6 +17,7 @@ from .ToolBase import ToolBase
 from ..ConfigMgr.configMgr import (
     get_max_concurrent_generations,
     get_min_request_interval_seconds,
+    get_proxy_port,
     normalize_base_url,
 )
 
@@ -146,7 +147,7 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         api_key: Optional[
             str
         ] = None,  # lm-studio或其他本地部署的模型可能不需要api_key，但是仍然需要传参
-        proxy: Optional[str] = "http://127.0.0.1:7890",
+        proxy: Optional[str] = None,
     ):
 
         self.name = name
@@ -166,6 +167,10 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         parsed_base_url = urlparse(self.base_url)
         if parsed_base_url.hostname in {"127.0.0.1", "localhost"}:
             proxy = None
+        elif proxy is None:
+            port = get_proxy_port()
+            if port is not None:
+                proxy = f"http://127.0.0.1:{port}"
 
         self.httpx_client = httpx.Client(proxy=proxy) if proxy else httpx.Client()
         self.openai_client = OpenAI(
