@@ -6,7 +6,7 @@ from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
 from openai.types.completion_usage import CompletionUsage
 import httpx
-from typing import Any, Callable, Optional, Iterable, cast
+from typing import Any, Optional, Iterable, cast
 import json
 import time
 import logging
@@ -218,7 +218,6 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         )  # 存储工具列表的JSON-ready版本，每个元素是一个字典，包含工具名称和描述，用于传给模型
         self.token_usage: dict[str, int] = {}
         self.history: list[dict[str, Any]] = []
-        self.event_callback: Optional[Callable[[str, dict[str, Any]], None]] = None
 
     @classmethod
     def _get_endpoint_limiter(
@@ -289,15 +288,6 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
     # 设置系统提示词
     def add_system_prompt(self, system_prompt: str) -> None:
         self.system_prompts.append(system_prompt)
-
-    def set_event_callback(
-        self, callback: Optional[Callable[[str, dict[str, Any]], None]]
-    ) -> None:
-        self.event_callback = callback
-
-    def emit_event(self, event_type: str, payload: dict[str, Any]) -> None:
-        if self.event_callback is not None:
-            self.event_callback(event_type, payload)
 
     def _is_aliyun_compatible_host(self) -> bool:
         hostname = urlparse(self.base_url).hostname
@@ -444,14 +434,7 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         time_cost = time_end - time_start
         tokens_per_second = completion_tokens / time_cost if time_cost > 0 else 0
         self._logger.info(f"{tokens_per_second:.2f} tokens/s, use time {time_cost:.2f}s")
-        self.emit_event(
-            "model_response",
-            {
-                "usage": usage_dict,
-                "time_cost": time_cost,
-                "tokens_per_second": tokens_per_second,
-            },
-        )
+
 
     @staticmethod
     def _tool_calls_are_valid(response: ChatCompletion) -> bool:
@@ -488,7 +471,6 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         self._ensure_history_initialized()
         user_message = self._normalize_user_message(messages)
         self.history.append(user_message)
-        self.emit_event("user_message", {"content": user_message["content"]})
 
         response = self._post_chatHistory(self.history, log_path=log_path)
 
@@ -497,15 +479,7 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
             and len(response.choices[0].message.tool_calls) > 0
         ):
             self.history.append(response.choices[0].message.model_dump())
-            self.emit_event(
-                "assistant_tool_calls",
-                {
-                    "tool_calls": [
-                        tool_call.model_dump()
-                        for tool_call in response.choices[0].message.tool_calls
-                    ]
-                },
-            )
+
             for tool_call in response.choices[0].message.tool_calls:
                 self.history = self._handle_tool_call(
                     tool_call.model_dump(), self.history
@@ -515,7 +489,6 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         assistant_reply = response.choices[0].message.content
         assert assistant_reply is not None, "模型回复的内容为None"
         self.history.append(response.choices[0].message.model_dump())  # type: ignore
-        self.emit_event("assistant_message", {"content": assistant_reply})
         self.write_history_log(log_path)
         return assistant_reply
 
@@ -530,7 +503,6 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         self._ensure_history_initialized()
         user_message = self._normalize_user_message(messages)
         self.history.append(user_message)
-        self.emit_event("user_message", {"content": user_message["content"]})
 
         assistant_reply, reasoning_content = self._stream_chatHistory(
             self.history,
@@ -545,7 +517,6 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         if reasoning_content:
             assistant_message["reasoning_content"] = reasoning_content
         self.history.append(assistant_message)
-        self.emit_event("assistant_message", {"content": assistant_reply})
         self.write_history_log(log_path)
         return assistant_reply
 
@@ -654,10 +625,6 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
                                 reasoning_delta = self._extract_reasoning_content(delta)
                                 if reasoning_delta:
                                     reasoning_parts.append(reasoning_delta)
-                                    self.emit_event(
-                                        "assistant_reasoning_delta",
-                                        {"content": reasoning_delta},
-                                    )
                                 if (
                                     delta.tool_calls is not None
                                     or delta.function_call is not None
@@ -669,10 +636,6 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
                                 content_delta = delta.content
                                 if content_delta:
                                     assistant_parts.append(content_delta)
-                                    self.emit_event(
-                                        "assistant_delta",
-                                        {"content": content_delta},
-                                    )
                     finally:
                         close_stream = getattr(stream_response, "close", None)
                         if callable(close_stream):
@@ -744,52 +707,19 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         self, tool_call: dict[str, Any], ctx: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         tool_name = tool_call["function"]["name"]
-        tool_args: dict[str, Any] | str
-        try:
-            tool_args = ToolBase.parse_toolcall_arguments(tool_call)
-        except Exception:
-            tool_args = tool_call["function"]["arguments"]
-        self.emit_event(
-            "tool_call_start",
-            {
-                "tool_name": tool_name,
-                "arguments": tool_args,
-                "tool_call_id": tool_call["id"],
-            },
-        )
         for tool in self.tool_list:
             if tool.toolName == tool_name:
                 new_ctx = tool.execute(tool_call, ctx)
-                tool_result = ""
                 for message in reversed(new_ctx):
                     if (
                         isinstance(message, dict)  # type: ignore
                         and message.get("role") == "tool"
                         and message.get("tool_call_id") == tool_call["id"]
                     ):
-                        tool_result = str(message.get("content", ""))
                         break
-                self.emit_event(
-                    "tool_call_end",
-                    {
-                        "tool_name": tool_name,
-                        "arguments": tool_args,
-                        "tool_call_id": tool_call["id"],
-                        "result": tool_result,
-                    },
-                )
                 return new_ctx
         error_msg = f"Tool '{tool_name}' not found in registered tools"
         self._logger.error(error_msg)
-        self.emit_event(
-            "tool_call_end",
-            {
-                "tool_name": tool_name,
-                "arguments": tool_args,
-                "tool_call_id": tool_call["id"],
-                "result": error_msg,
-            },
-        )
         ctx.append(
             {
                 "role": "tool",
