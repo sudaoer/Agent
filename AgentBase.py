@@ -132,10 +132,10 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
                 )
                 if self._dynamic and self.max_concurrent > 1:
                     old = self.max_concurrent
-                    self.max_concurrent = max(1, self.max_concurrent * 3 // 4)
+                    self.max_concurrent = max(1, self.max_concurrent * 9 // 10)
                     if self.max_concurrent != old:
                         _logger = logging.getLogger(__name__)
-                        _logger.info(
+                        _logger.warning(
                             "Dynamic concurrency: reduced max_concurrent %d -> %d",
                             old,
                             self.max_concurrent,
@@ -161,7 +161,7 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
                             old = self.max_concurrent
                             self.max_concurrent += 1
                             _logger = logging.getLogger(__name__)
-                            _logger.info(
+                            _logger.warning(
                                 "Dynamic concurrency: increased max_concurrent %d -> %d",
                                 old,
                                 self.max_concurrent,
