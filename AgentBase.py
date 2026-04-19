@@ -16,8 +16,8 @@ from urllib.parse import urlparse
 from .ToolBase import ToolBase
 from ..ConfigMgr.configMgr import (
     get_max_concurrent_generations,
-    get_min_request_interval_seconds,
     get_proxy_port,
+    is_self_hosted_endpoint,
     normalize_base_url,
 )
 
@@ -55,15 +55,18 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
     _ALIYUN_EXPLICIT_CACHE_ROLES = {"system", "user", "assistant", "tool"}
 
     class _EndpointConcurrencyLimiter:
-        def __init__(self, max_concurrent: int, min_request_interval_seconds: float):
+        _tls = threading.local()
+        _DYNAMIC_INCREASE_THRESHOLD = 20
+
+        def __init__(self, max_concurrent: int, *, dynamic: bool = False):
             self.max_concurrent = max_concurrent
-            self.min_request_interval_seconds = min_request_interval_seconds
+            self._dynamic = dynamic
             self._active_count = 0
             self._next_ticket = 0
             self._waiting_tickets: deque[int] = deque()
-            self._next_request_time = 0.0
             self._blocked_until = 0.0
             self._consecutive_rate_limits = 0
+            self._successes_at_capacity = 0
             self._condition = threading.Condition()
 
         @contextmanager
@@ -91,16 +94,12 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
                         and self._waiting_tickets[0] == ticket
                     )
                     has_capacity = self._active_count < self.max_concurrent
-                    earliest_allowed_time = max(
-                        self._next_request_time,
-                        self._blocked_until,
-                    )
-                    wait_seconds = max(0.0, earliest_allowed_time - now)
+                    wait_seconds = max(0.0, self._blocked_until - now)
                     if is_front and has_capacity and wait_seconds <= 0:
                         self._waiting_tickets.popleft()
                         self._active_count += 1
-                        self._next_request_time = (
-                            now + self.min_request_interval_seconds
+                        type(self)._tls._was_at_capacity = (
+                            self._active_count >= self.max_concurrent
                         )
                         return
                     self._condition.wait(
@@ -118,6 +117,7 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         ) -> float:
             with self._condition:
                 self._consecutive_rate_limits += 1
+                self._successes_at_capacity = 0
                 exponential_backoff = min(
                     0.5 * (2 ** (self._consecutive_rate_limits - 1)),
                     8.0,
@@ -125,18 +125,47 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
                 wait_seconds = max(
                     retry_after_seconds or 0.0,
                     exponential_backoff,
-                    self.min_request_interval_seconds,
                 )
                 self._blocked_until = max(
                     self._blocked_until,
                     time.monotonic() + wait_seconds,
                 )
+                if self._dynamic and self.max_concurrent > 1:
+                    old = self.max_concurrent
+                    self.max_concurrent = max(1, self.max_concurrent * 3 // 4)
+                    if self.max_concurrent != old:
+                        _logger = logging.getLogger(__name__)
+                        _logger.info(
+                            "Dynamic concurrency: reduced max_concurrent %d -> %d",
+                            old,
+                            self.max_concurrent,
+                        )
                 self._condition.notify_all()
                 return wait_seconds
 
         def record_success(self) -> None:
             with self._condition:
                 self._consecutive_rate_limits = 0
+                if self._dynamic:
+                    was_at_capacity = getattr(
+                        type(self)._tls, "_was_at_capacity", False
+                    )
+                    type(self)._tls._was_at_capacity = False
+                    if was_at_capacity:
+                        self._successes_at_capacity += 1
+                        if (
+                            self._successes_at_capacity
+                            >= self._DYNAMIC_INCREASE_THRESHOLD
+                        ):
+                            self._successes_at_capacity = 0
+                            old = self.max_concurrent
+                            self.max_concurrent += 1
+                            _logger = logging.getLogger(__name__)
+                            _logger.info(
+                                "Dynamic concurrency: increased max_concurrent %d -> %d",
+                                old,
+                                self.max_concurrent,
+                            )
                 self._condition.notify_all()
 
     def __init__(
@@ -155,11 +184,8 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         self.model_name = model_name
         self.api_key = "test_api_key" if api_key is None else api_key
         self.normalized_base_url = normalize_base_url(self.base_url)
+        self._is_self_hosted = is_self_hosted_endpoint(self.base_url)
         self.max_concurrent_generations = get_max_concurrent_generations(
-            self.base_url,
-            self.model_name,
-        )
-        self.min_request_interval_seconds = get_min_request_interval_seconds(
             self.base_url,
             self.model_name,
         )
@@ -199,7 +225,7 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         cls,
         normalized_base_url: str,
         max_concurrent_generations: int | None,
-        min_request_interval_seconds: float,
+        dynamic: bool,
     ) -> "_EndpointConcurrencyLimiter | None":
         if max_concurrent_generations is None:
             return None
@@ -208,12 +234,13 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
             if limiter is None:
                 limiter = cls._EndpointConcurrencyLimiter(
                     max_concurrent_generations,
-                    min_request_interval_seconds,
+                    dynamic=dynamic,
                 )
                 cls._endpoint_limiters[normalized_base_url] = limiter
                 return limiter
-            limiter.max_concurrent = max_concurrent_generations
-            limiter.min_request_interval_seconds = min_request_interval_seconds
+            limiter.max_concurrent = max(
+                limiter.max_concurrent, max_concurrent_generations
+            )
             return limiter
 
     @contextmanager
@@ -221,15 +248,16 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         limiter = self._get_endpoint_limiter(
             self.normalized_base_url,
             self.max_concurrent_generations,
-            self.min_request_interval_seconds,
+            dynamic=not self._is_self_hosted,
         )
         if limiter is None:
             yield
             return
         self._logger.debug(
-            "Waiting for generation slot on %s (limit=%s)",
+            "Waiting for generation slot on %s (limit=%s, dynamic=%s)",
             self.normalized_base_url,
-            self.max_concurrent_generations,
+            limiter.max_concurrent,
+            limiter._dynamic,  # pyright: ignore[reportPrivateUsage]
         )
         with limiter.acquire():
             yield
@@ -238,7 +266,7 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         return self._get_endpoint_limiter(
             self.normalized_base_url,
             self.max_concurrent_generations,
-            self.min_request_interval_seconds,
+            dynamic=not self._is_self_hosted,
         )
 
     @staticmethod
