@@ -433,7 +433,7 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         completion_tokens = usage_dict.get("completion_tokens", 0)
         time_cost = time_end - time_start
         tokens_per_second = completion_tokens / time_cost if time_cost > 0 else 0
-        self._logger.info(f"{tokens_per_second:.2f} tokens/s, use time {time_cost:.2f}s")
+        self._logger.debug(f"{tokens_per_second:.2f} tokens/s, use time {time_cost:.2f}s")
 
 
     @staticmethod
