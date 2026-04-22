@@ -345,44 +345,53 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         self, history: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         request_messages = deepcopy(history)
+        system_message_index: int | None = None
 
-        for message in reversed(request_messages):
+        for index, message in enumerate(request_messages):
+            if message.get("role") != "system":
+                continue
+            if self._mark_aliyun_explicit_cache_message(message):
+                system_message_index = index
+                break
+
+        for index in range(len(request_messages) - 1, -1, -1):
+            if index == system_message_index:
+                continue
+            message = request_messages[index]
             if message.get("role") not in self._ALIYUN_EXPLICIT_CACHE_ROLES:
                 continue
-
-            content = message.get("content")
-            if isinstance(content, str):
-                message["content"] = [
-                    {
-                        "type": "text",
-                        "text": content,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ]
-                return request_messages
-
-            if isinstance(content, list) and len(cast(list[Any],content)) > 0:
-                if not all(isinstance(item, dict) for item in content): # type: ignore
-                    self._logger.debug(
-                        "Skipping Aliyun explicit cache marker because the trailing content list is not dict-only."
-                    )
-                    return request_messages 
-                last_content_block = content[-1] # type: ignore
-                if not isinstance(last_content_block, dict):
-                    self._logger.debug(
-                        "Skipping Aliyun explicit cache marker because the trailing content block is not a dictionary."
-                    )
-                    return request_messages
-                last_content_block["cache_control"] = {"type": "ephemeral"}
-                return request_messages
-
-            self._logger.debug(
-                "Skipping Aliyun explicit cache marker because trailing %s message content is not safely rewritable.",
-                message.get("role"),
-            )
+            self._mark_aliyun_explicit_cache_message(message)
             return request_messages
 
         return request_messages
+
+    def _mark_aliyun_explicit_cache_message(self, message: dict[str, Any]) -> bool:
+        content = message.get("content")
+        if isinstance(content, str):
+            message["content"] = [
+                {
+                    "type": "text",
+                    "text": content,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+            return True
+
+        if isinstance(content, list) and len(cast(list[Any], content)) > 0:
+            if not all(isinstance(item, dict) for item in content):  # type: ignore
+                self._logger.debug(
+                    "Skipping Aliyun explicit cache marker because the message content list is not dict-only."
+                )
+                return False
+            content_blocks = cast(list[dict[str, Any]], content)
+            content_blocks[-1]["cache_control"] = {"type": "ephemeral"}
+            return True
+
+        self._logger.debug(
+            "Skipping Aliyun explicit cache marker because %s message content is not safely rewritable.",
+            message.get("role"),
+        )
+        return False
 
     def _prepare_chat_request(
         self,
@@ -433,8 +442,9 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         completion_tokens = usage_dict.get("completion_tokens", 0)
         time_cost = time_end - time_start
         tokens_per_second = completion_tokens / time_cost if time_cost > 0 else 0
-        self._logger.debug(f"{tokens_per_second:.2f} tokens/s, use time {time_cost:.2f}s")
-
+        self._logger.debug(
+            f"{tokens_per_second:.2f} tokens/s, use time {time_cost:.2f}s"
+        )
 
     @staticmethod
     def _tool_calls_are_valid(response: ChatCompletion) -> bool:
@@ -463,8 +473,9 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
 
     def _ensure_history_initialized(self) -> None:
         if len(self.history) == 0:
-            self.history = [{"role": "system", "content": "\n".join(self.system_prompts)}]
-
+            self.history = [
+                {"role": "system", "content": "\n".join(self.system_prompts)}
+            ]
 
     # 进行一次对话，输入为用户消息，输出为模型回复，并且处理工具调用并更新对话历史
     def chat(self, messages: Any, log_path: Optional[str] = None) -> str:
@@ -586,7 +597,9 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
                         invalid_arg = arguments
                     elif arguments is not None:
                         invalid_arg = str(arguments)
-            self._logger.error("Invalid tool call arguments: %s\nRetrying...", invalid_arg)
+            self._logger.error(
+                "Invalid tool call arguments: %s\nRetrying...", invalid_arg
+            )
 
         return response
 
