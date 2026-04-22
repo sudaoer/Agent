@@ -52,7 +52,13 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
     _logger = logging.getLogger(__name__)
     _endpoint_limiters: dict[str, "_EndpointConcurrencyLimiter"] = {}
     _endpoint_limiters_lock = threading.Lock()
+    _model_list_cache: dict[str, tuple[str, ...]] = {}
+    _model_list_cache_lock = threading.Lock()
+    _model_list_fetch_locks: dict[str, threading.Lock] = {}
     _ALIYUN_EXPLICIT_CACHE_ROLES = {"system", "user", "assistant", "tool"}
+    _MODEL_LIST_MAX_RETRIES = 6
+    _MODEL_LIST_INITIAL_BACKOFF_SECONDS = 2.0
+    _MODEL_LIST_MAX_BACKOFF_SECONDS = 30.0
 
     class _EndpointConcurrencyLimiter:
         _tls = threading.local()
@@ -206,10 +212,10 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         self.system_prompts: list[str] = []
 
         # 检查模型是否可用
-        model_list = self.openai_client.models.list()
-        if self.model_name not in [model.id for model in model_list.data]:
+        model_ids = self._get_available_model_ids_for_base_url()
+        if self.model_name not in model_ids:
             raise ValueError(
-                f"Model '{self.model_name}' is not available in the model list: {[model.id for model in model_list.data]}"
+                f"Model '{self.model_name}' is not available in the model list: {list(model_ids)}"
             )
 
         self.tool_list: list[ToolBase] = []  # 存储注册的工具
@@ -218,6 +224,73 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         )  # 存储工具列表的JSON-ready版本，每个元素是一个字典，包含工具名称和描述，用于传给模型
         self.token_usage: dict[str, int] = {}
         self.history: list[dict[str, Any]] = []
+
+    @classmethod
+    def _get_model_list_fetch_lock(cls, normalized_base_url: str) -> threading.Lock:
+        with cls._model_list_cache_lock:
+            existing = cls._model_list_fetch_locks.get(normalized_base_url)
+            if existing is not None:
+                return existing
+            lock = threading.Lock()
+            cls._model_list_fetch_locks[normalized_base_url] = lock
+            return lock
+
+    def _list_models_with_retry(self) -> tuple[str, ...]:
+        attempt = 0
+        while True:
+            try:
+                model_list = self.openai_client.models.list()
+                return tuple(
+                    model.id
+                    for model in model_list.data
+                    if isinstance(getattr(model, "id", None), str)
+                )
+            except RateLimitError as exc:
+                attempt += 1
+                if attempt > self._MODEL_LIST_MAX_RETRIES:
+                    self._logger.error(
+                        "Rate limited on %s while listing models; exceeded retries (%s)",
+                        self.normalized_base_url,
+                        self._MODEL_LIST_MAX_RETRIES,
+                    )
+                    raise
+                limiter = self._get_active_endpoint_limiter()
+                retry_after_seconds = self._extract_retry_after_seconds(exc.response)
+                wait_seconds = max(
+                    retry_after_seconds or 0.0,
+                    min(
+                        self._MODEL_LIST_INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)),
+                        self._MODEL_LIST_MAX_BACKOFF_SECONDS,
+                    ),
+                )
+                if limiter is not None:
+                    wait_seconds = limiter.record_rate_limit(retry_after_seconds)
+                self._logger.warning(
+                    "Rate limited on %s while listing models, retrying in %.2fs (attempt=%s/%s)",
+                    self.normalized_base_url,
+                    wait_seconds,
+                    attempt,
+                    self._MODEL_LIST_MAX_RETRIES,
+                )
+                time.sleep(wait_seconds)
+
+    def _get_available_model_ids_for_base_url(self) -> tuple[str, ...]:
+        with type(self)._model_list_cache_lock:
+            cached = type(self)._model_list_cache.get(self.normalized_base_url)
+        if cached is not None:
+            return cached
+
+        fetch_lock = type(self)._get_model_list_fetch_lock(self.normalized_base_url)
+        with fetch_lock:
+            with type(self)._model_list_cache_lock:
+                cached = type(self)._model_list_cache.get(self.normalized_base_url)
+            if cached is not None:
+                return cached
+
+            model_ids = self._list_models_with_retry()
+            with type(self)._model_list_cache_lock:
+                type(self)._model_list_cache[self.normalized_base_url] = model_ids
+            return model_ids
 
     @classmethod
     def _get_endpoint_limiter(
