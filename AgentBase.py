@@ -23,7 +23,7 @@ from ..ConfigMgr.configMgr import (
 
 class AgentBase(ABC):
     @abstractmethod
-    def __init__(self):
+    def __init__(self) -> None:
         pass
 
     @abstractmethod
@@ -31,9 +31,10 @@ class AgentBase(ABC):
         pass
 
     @abstractmethod
-    def chat(self, messages: Any) -> str:
+    def chat(self, messages: Any, log_path: str | None = None) -> str:
         pass
 
+    @abstractmethod
     def chat_stream(
         self,
         messages: Any,
@@ -42,9 +43,27 @@ class AgentBase(ABC):
         extra_body: dict[str, Any] | None = None,
         stream_options: dict[str, Any] | None = None,
     ) -> str:
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not support chat_stream()."
-        )
+        pass
+
+    @abstractmethod
+    def get_history(self) -> list[dict[str, Any]]:
+        pass
+
+    @abstractmethod
+    def get_token_consumption(self) -> dict[str, int]:
+        pass
+
+    @abstractmethod
+    def register_tool(self, tool: ToolBase) -> None:
+        pass
+
+    @abstractmethod
+    def register_tool_list(self, tools: Iterable[ToolBase]) -> None:
+        pass
+
+    @abstractmethod
+    def write_history_log(self, log_path: str | None) -> None:
+        pass
 
 
 class Agent_OpenAIChat_API_Backend(AgentBase):
