@@ -4,12 +4,20 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import urlparse
 
-from ..ConfigMgr.configMgr import (
-    get_baseurl_key,
-    get_key,
-    get_provider_for_baseurl,
-    get_provider_for_model,
-)
+try:
+    from ..ConfigMgr.configMgr import (
+        get_baseurl_key,
+        get_key,
+        get_provider_for_baseurl,
+        get_provider_for_model,
+    )
+except ImportError:
+    from ConfigMgr.configMgr import (
+        get_baseurl_key,
+        get_key,
+        get_provider_for_baseurl,
+        get_provider_for_model,
+    )
 from .AgentBase import AgentBase, Agent_OpenAIChat_API_Backend
 from .ProviderChatAgent import (
     AliyunChatAgent,

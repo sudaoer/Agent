@@ -13,12 +13,20 @@ import threading
 from abc import ABC, abstractmethod
 from urllib.parse import urlparse
 from .ToolBase import ToolBase
-from ..ConfigMgr.configMgr import (
-    get_max_concurrent_generations,
-    get_proxy_port,
-    is_self_hosted_endpoint,
-    normalize_base_url,
-)
+try:
+    from ..ConfigMgr.configMgr import (
+        get_max_concurrent_generations,
+        get_proxy_port,
+        is_self_hosted_endpoint,
+        normalize_base_url,
+    )
+except ImportError:
+    from ConfigMgr.configMgr import (
+        get_max_concurrent_generations,
+        get_proxy_port,
+        is_self_hosted_endpoint,
+        normalize_base_url,
+    )
 
 
 class AgentBase(ABC):
