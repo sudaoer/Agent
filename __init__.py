@@ -1,15 +1,26 @@
 from .CoTChatAgent import CoTChatAgent
 from .VisionChatAgent import VisionChatAgent
-from .AgentBase import Agent_OpenAIChat_API_Backend
+from .AgentBase import AgentBase, Agent_OpenAIChat_API_Backend
+from .ProviderChatAgent import (
+    AliyunChatAgent,
+    DeepSeekChatAgent,
+    OpenAICompatibleChatAgent,
+)
+from .factory import build
 from .Skill import Skill
 from .ToolBase import ToolBase
 from .ToolNormal import ToolNormal
 
 
 __all__ = [
+    "AgentBase",
+    "AliyunChatAgent",
     "CoTChatAgent",
+    "DeepSeekChatAgent",
+    "OpenAICompatibleChatAgent",
     "VisionChatAgent",
     "Agent_OpenAIChat_API_Backend",
+    "build",
     "Skill",
     "ToolBase",
     "ToolNormal",

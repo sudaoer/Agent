@@ -1,6 +1,5 @@
 from collections import deque
 from contextlib import contextmanager
-from copy import deepcopy
 from openai import OpenAI, RateLimitError
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
@@ -55,7 +54,6 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
     _model_list_cache: dict[str, tuple[str, ...]] = {}
     _model_list_cache_lock = threading.Lock()
     _model_list_fetch_locks: dict[str, threading.Lock] = {}
-    _ALIYUN_EXPLICIT_CACHE_ROLES = {"system", "user", "assistant", "tool"}
     _MODEL_LIST_MAX_RETRIES = 6
     _MODEL_LIST_INITIAL_BACKOFF_SECONDS = 2.0
     _MODEL_LIST_MAX_BACKOFF_SECONDS = 30.0
@@ -362,10 +360,6 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
     def add_system_prompt(self, system_prompt: str) -> None:
         self.system_prompts.append(system_prompt)
 
-    def _is_aliyun_compatible_host(self) -> bool:
-        hostname = urlparse(self.base_url).hostname
-        return isinstance(hostname, str) and "aliyun" in hostname.lower()
-
     def write_history_log(self, log_path: Optional[str]) -> None:
         if log_path is not None:
 
@@ -414,58 +408,6 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
                 "content": normalized_content,
             }
 
-    def _build_aliyun_explicit_cache_messages(
-        self, history: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        request_messages = deepcopy(history)
-        system_message_index: int | None = None
-
-        for index, message in enumerate(request_messages):
-            if message.get("role") != "system":
-                continue
-            if self._mark_aliyun_explicit_cache_message(message):
-                system_message_index = index
-                break
-
-        for index in range(len(request_messages) - 1, -1, -1):
-            if index == system_message_index:
-                continue
-            message = request_messages[index]
-            if message.get("role") not in self._ALIYUN_EXPLICIT_CACHE_ROLES:
-                continue
-            self._mark_aliyun_explicit_cache_message(message)
-            return request_messages
-
-        return request_messages
-
-    def _mark_aliyun_explicit_cache_message(self, message: dict[str, Any]) -> bool:
-        content = message.get("content")
-        if isinstance(content, str):
-            message["content"] = [
-                {
-                    "type": "text",
-                    "text": content,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ]
-            return True
-
-        if isinstance(content, list) and len(cast(list[Any], content)) > 0:
-            if not all(isinstance(item, dict) for item in content):  # type: ignore
-                self._logger.debug(
-                    "Skipping Aliyun explicit cache marker because the message content list is not dict-only."
-                )
-                return False
-            content_blocks = cast(list[dict[str, Any]], content)
-            content_blocks[-1]["cache_control"] = {"type": "ephemeral"}
-            return True
-
-        self._logger.debug(
-            "Skipping Aliyun explicit cache marker because %s message content is not safely rewritable.",
-            message.get("role"),
-        )
-        return False
-
     def _prepare_chat_request(
         self,
         history: list[dict[str, Any]],
@@ -484,15 +426,9 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
         request_history, request_extra_body = self._prepare_chat_request(
             history, extra_body
         )
-        request_messages = request_history
-        if self._is_aliyun_compatible_host():
-            request_messages = self._build_aliyun_explicit_cache_messages(
-                request_history
-            )
-
         request_kwargs: dict[str, Any] = {
             "model": self.model_name,
-            "messages": request_messages,
+            "messages": request_history,
             "extra_body": request_extra_body or None,
         }
         if self.tool_list_jsonready_cache:
@@ -550,6 +486,9 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
                 {"role": "system", "content": "\n".join(self.system_prompts)}
             ]
 
+    def _dump_assistant_message_for_history(self, message: Any) -> dict[str, Any]:
+        return cast(dict[str, Any], message.model_dump())
+
     # 进行一次对话，输入为用户消息，输出为模型回复，并且处理工具调用并更新对话历史
     def chat(self, messages: Any, log_path: Optional[str] = None) -> str:
         self._ensure_history_initialized()
@@ -562,7 +501,9 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
             response.choices[0].message.tool_calls is not None
             and len(response.choices[0].message.tool_calls) > 0
         ):
-            self.history.append(response.choices[0].message.model_dump())
+            self.history.append(
+                self._dump_assistant_message_for_history(response.choices[0].message)
+            )
 
             for tool_call in response.choices[0].message.tool_calls:
                 self.history = self._handle_tool_call(
@@ -572,7 +513,9 @@ class Agent_OpenAIChat_API_Backend(AgentBase):
 
         assistant_reply = response.choices[0].message.content
         assert assistant_reply is not None, "模型回复的内容为None"
-        self.history.append(response.choices[0].message.model_dump())  # type: ignore
+        self.history.append(
+            self._dump_assistant_message_for_history(response.choices[0].message)
+        )
         self.write_history_log(log_path)
         return assistant_reply
 
