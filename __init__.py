@@ -6,7 +6,7 @@ from .ProviderChatAgent import (
     DeepSeekChatAgent,
     OpenAICompatibleChatAgent,
 )
-from .factory import build
+from .factory import buildAgent
 from .Skill import Skill
 from .ToolBase import ToolBase
 from .ToolNormal import ToolNormal
@@ -20,7 +20,7 @@ __all__ = [
     "OpenAICompatibleChatAgent",
     "VisionChatAgent",
     "Agent_OpenAIChat_API_Backend",
-    "build",
+    "buildAgent",
     "Skill",
     "ToolBase",
     "ToolNormal",

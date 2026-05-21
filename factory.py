@@ -26,7 +26,7 @@ from .ProviderChatAgent import (
 )
 
 
-def build(
+def buildAgent(
     model_name: str,
     base_url: str | None = None,
     *,
