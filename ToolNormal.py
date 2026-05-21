@@ -10,13 +10,17 @@ class ToolNormal(ToolBase):
     def execute(
         self, tool_call_info: dict[str, Any], ctx: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
+        try:
+            content = self.run(self.parse_toolcall_arguments(tool_call_info))
+        except TimeoutError as exc:
+            content = f"Error: tool '{self.toolName}' timed out: {exc}"
 
         # 直接将工具调用信息添加到上下文中，工具的输出由模型根据工具调用信息生成
         ctx.append(
             {
                 "role": "tool",
                 "tool_call_id": tool_call_info["id"],
-                "content": self.run(self.parse_toolcall_arguments(tool_call_info)),
+                "content": content,
             }
         )
         return ctx
