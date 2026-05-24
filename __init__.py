@@ -7,7 +7,6 @@ from .ProviderChatAgent import (
     OpenAICompatibleChatAgent,
 )
 from .factory import buildAgent
-from .Skill import Skill
 from .ToolBase import ToolBase
 from .ToolNormal import ToolNormal
 
@@ -21,7 +20,6 @@ __all__ = [
     "VisionChatAgent",
     "Agent_OpenAIChat_API_Backend",
     "buildAgent",
-    "Skill",
     "ToolBase",
     "ToolNormal",
 ]
